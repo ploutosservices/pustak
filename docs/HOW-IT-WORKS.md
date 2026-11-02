@@ -14,7 +14,7 @@ documents own:
 | restoring the estate onto a ground | `production-install.md` |
 | upgrading MODX itself | `upgrades.md` |
 | the storage-backed file gate | `modx-storage-gate.md` |
-| sign-in | `modx-sso-design.md`, and the mock-oidc section below for dev/staging |
+| sign-in | `modx-sso-design.md`, and the sign-in section below for the door's realms per ground |
 | the words a page may use (`[[$cardStart]]`, `[[!tableRenderer]]` …) | `content-vocabulary.md` |
 
 `seat/` and `install/` are **not in this repository** — they are the estate repository (`modx-estate`), resolved from
@@ -54,7 +54,7 @@ are not.
 
 **Estate facts are neither.** Which contexts exist, the bench zone — all of that lives in
 `estate.json` in the estate repository (`modx-estate`). Which NAME reaches which context is the edge's: nginx sets
-`X-Tenant` from the name's `upstream_key` (a bench port door sets it from `BENCH_TENANT`), and
+`X-Tenant` from the name's tenant, and
 `config.context.php` is one line requiring `EdgeContext.php`, which reads that header and never the
 host. It used to be a host map, first inside the docroot tar, then generated.
 
@@ -97,9 +97,11 @@ Readable without a shell: `GET /actuator/info?report=settings` (see §4).
 
 ### Sign-in differs by design, and it is a step of the restore
 
-Dev and staging authenticate against **mock-oidc**, never Google. The guard is the
-internal **zone suffix**, not a hostname — a zone is a property of the network, a name is something
-somebody maintains.
+Every ground signs in at the **estate sign-in door** (design/estate-sign-in.md): production at
+production's door, dev and staging at the non-production door's `dev` and `staging` realms, which
+hold test users only. The mock provider is retired. The guard is the internal **zone
+suffix**, not a hostname — a zone is a property of the network, a name is something somebody
+maintains.
 
 **`setup/12-sso.py` has two switches and they are not the same switch:**
 
@@ -111,8 +113,8 @@ One MODx serves four contexts and `getOption()` resolves a context setting over 
 **the per-context path is the one that decides.** Passing only `MODX_SSO_IDP` writes the endpoints and
 leaves `sso.provider` on `google`, which is a half-configured state that reports success — the fault
 the owner hit on staging on 2026-08-18. On an internal-zone ground the contexts are derived from the bench zone,
-so `MODX_SSO_OIDC_CONTEXTS` is not needed there; the secret is (mock-oidc's `MOCK_OIDC_CLIENTS` is
-empty by design and accepts any client, so it is configuration and not a credential).
+so `MODX_SSO_OIDC_CONTEXTS` is not needed there; the secret is each context's door client secret,
+handed in the environment by the bench's sign-in setup from the dev OpenBao.
 
 ---
 
@@ -123,14 +125,14 @@ The last column is the point of this table.
 | Program | Owns | Will silently not do |
 |---|---|---|
 | `apply-modx-elements.sh` (infra's, skunkworks runs it) | upsert elements into a ground by name; snapshot first; clear the element caches | it does not deploy `common/lib`. It clears only `{scripts,includes}/elements` and the `resource` cache. `--target local` resolves to `${MODX_ROOT:-/srv/local/modx}` and applies to **nothing** if no bench is there. A plugin without a `<name>.events` sidecar is refused — before that it deployed code wired to no event and reported success. |
-| `setup/make-current.sh` | build a bench: unpack the docroot tar, write machine config, place `common/lib` and the one-line `config.context.php`, load the seed, bind bench domains | it does not create the database, and it refuses on an uncommitted repo or a populated schema unless `FORCE=1`. It does not start the `php -S` port doors; each needs `BENCH_TENANT=<context>` (setup/bench-server.php) or every page answers the estate 404. Until 2026-08-18 it did not write `config.context.php` at all, so a bench with 1,545 resources answered MODX's own 404 on every host and explained nothing. |
-| `setup/load-seed.sh` | load + bind + verify, as ONE act | the pairing is deliberate: a seed loaded without its domain bind is the failure this prevents, on the ground that is supposed to be safe. |
-| `setup/bench-domains.py` | rebind hosts to `*.modx.<internal zone>` after any restore | without it the bench answers for production's public names. |
+| `setup/make-current.sh` | build a bench: unpack the docroot tar, write machine config, place `common/lib` and the one-line `config.context.php`, render the bench's `application.php`, load the seed | it does not create the database, and it refuses on an uncommitted repo or a populated schema unless `FORCE=1`. Until 2026-08-18 it did not write `config.context.php` at all, so a bench with 1,545 resources answered MODX's own 404 on every host and explained nothing. |
+| `setup/load-seed.sh` | load + bind + verify, as ONE act (the bind is `setup/apply-environment.php`) | the pairing is deliberate: a seed loaded without its bind is the failure this prevents, on the ground that is supposed to be safe. |
+| the bench's renderer | render a bench's `application.php` from infra's `modx-environment.py --env dev --machine <box>` | MODx types no host name; without it the bench answers for production's public names. |
 | `setup/config-context.py` | write `config.context.php`: the one-line `EdgeContext.php` require, the same on every profile | it decides nothing — the context is the edge's `X-Tenant` header, read by `EdgeContext.php`. |
 | `setup/12-sso.py` | the SSO wiring: settings, the four pages per context, repointing login/logout/unauthorized | see §2 — the wrong variable leaves `sso.provider` on Google and says nothing. It refuses to point a context outside the internal zone at the mock. |
 | `setup/13-storage-gate.py` | the `storage.*` settings and the delivery plumbing | it REWRITES `storage.base_url` and `storage.environment` from its defaults unless `MODX_STORAGE_BASEURL` / `MODX_STORAGE_ENV` name them (the token only when given). Running it to update one plugin can repoint the storage door and reset the scope. Its own default was `http://` until 2026-08-18. |
 | `clear-cache.php` | refresh MODx's whole cache (`cacheManager->refresh()`), carrying `core/cache/logs` aside and back | a bare `refresh()` deletes the error log, which is how two earlier defects both hid — so it refuses to refresh if it cannot move the log aside. It also cannot delete files owned by another user: if the php-fpm pool and the tree's owner are different accounts, it reports success having removed nothing. |
-| `ops.sh local restore_modx_dev` | pull production's dump through night-desk with the agent's OWN token, load it, rebind, point SSO at the mock, regenerate the working tree, then apply git master to the bench (`setup/deploy-local.sh`; `--production-only` skips it) | it REGENERATES `common/` and `seat/` from the database and leaves them uncommitted — so it can overwrite committed code NEWER than the dump, and a session-close `git add -A` would push the regression. Check `git status` after every run. |
+| `ops.sh local restore_modx_dev` | pull production's dump through night-desk with the agent's OWN token, load it, rebind, regenerate the working tree (then the bench's sign-in setup points SSO at the dev realm), then apply git master to the bench (`setup/deploy-local.sh`; `--production-only` skips it) | it REGENERATES `common/` and `seat/` from the database and leaves them uncommitted — so it can overwrite committed code NEWER than the dump, and a session-close `git add -A` would push the regression. Check `git status` after every run. |
 | `ops.sh staging modx` | dispatch a staging refresh from production, through the door, audited by caller | production is only ever READ. |
 | `ops.sh seat modx` | fetch the seat commits a ground made, as a git bundle, and push them with YOUR Gitea identity | no ground pushes to Gitea. It stops rather than overwrite uncommitted seat edits in your clone. |
 | `seat/pull.py` / `seat/push.py` | documents between the database and files | `push.py` is BENCH ONLY. |

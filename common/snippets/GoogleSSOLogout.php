@@ -12,6 +12,27 @@
 
 $context = $modx->context->get('key');
 
+// THE MANAGER SIGNS OUT FIRST (the owner, 2026-10-24: "either sign me out or show me the button to
+// sign out. you leave me hanging"). Its session is a different cookie, which only a manager request
+// can end, so when the browser carries one the sign-out goes through /manager/?pustak-signout=<this
+// page's path> (adminDoor) and comes back here with mgr=done. Before anything below runs, so the door
+// session is still there to end on the second pass.
+if (($_GET['mgr'] ?? '') !== 'done') {
+    $mgrName = 'PHPSESSID';
+    $ss = $modx->getObject(\MODX\Revolution\modSystemSetting::class, 'session_name');
+    if ($ss && trim((string) $ss->get('value')) !== '') { $mgrName = trim((string) $ss->get('value')); }
+    if (!empty($_COOKIE[$mgrName]) && $mgrName !== session_name()) {
+        $modx->sendRedirect(rtrim(MODX_SITE_URL, '/') . MODX_MANAGER_URL . '?pustak-signout=' . rawurlencode((string) $modx->resource->get('uri')));
+        return '';
+    }
+}
+
+// THE DOOR'S SESSION ENDS TOO (the owner, 2026-10-20: "a logout should log out of app and
+// keycloak"). Read before the session keys below are dropped: the id_token this session signed in
+// with, or the one a refused address left (GoogleSSOCallback), is the door's id_token_hint.
+// claude/shared/design/modx-door-session.md.
+$doorHint = (string) ($_SESSION['sso.id_token'] ?? ($_SESSION['sso.door_hint'] ?? ''));
+
 $modx->invokeEvent('OnBeforeWebLogout', ['user' => $modx->user]);
 $modx->user->removeSessionContext($context);
 $modx->invokeEvent('OnWebLogout', ['user' => $modx->user]);
@@ -26,25 +47,49 @@ unset(
     $_SESSION['sso.verified_email'],
     $_SESSION['sso.id_token'],
     $_SESSION['sso.id_token_exp'],
+    $_SESSION['sso.access_token'],
     $_SESSION['sso.refresh_token'],
     $_SESSION['sso.returnUrl'],
-    $_SESSION['sso.pending']
+    $_SESSION['sso.pending'],
+    $_SESSION['sso.door_hint']
 );
 
-// THE MANAGER SESSION IS LEFT ALONE, AND SAID ALOUD. It lives in the `mgr` context and this
-// snippet ends one context — the web one. Ending mgr here would log him out of the manager
-// mid-edit, which is worse than the confusion it cures, so leaving it is deliberate. What was not
-// deliberate is that nothing SAID so: he signed out with the manager open, the site still knew
-// him, and the page offered no reason.
-$mgrStillOpen = $modx->user && $modx->user->isAuthenticated('mgr');
+// THE MANAGER IN THIS SAME SESSION ends here. Where a site context has no session_name of its own
+// (production, measured 2026-10-24: both answer Set-Cookie PHPSESSID), the site and the manager share
+// one session, so `mgr` is in it and is ended through the manager's own logout events. Where they are
+// separate, it was ended on the way here (adminDoor, ?pustak-signout).
+if ($modx->user && $modx->user->isAuthenticated('mgr')) {
+    $modx->invokeEvent('OnBeforeManagerLogout', ['user' => $modx->user, 'loginContext' => 'mgr']);
+    $modx->user->removeSessionContext('mgr');
+    $modx->invokeEvent('OnManagerLogout', ['user' => $modx->user, 'loginContext' => 'mgr']);
+}
+if ($modx->user && $modx->user->isAuthenticated('mgr')) {
+    // No screen of MODx's own says it any more, so the log does.
+    $modx->log(modX::LOG_LEVEL_WARN, '[GoogleSSOLogout] the manager session survived the sign-out');
+}
 
 // Return to the login entry (GoogleSSOStart); fall back to the site start if login_page is unset.
 $target = (int) $modx->getOption('login_page') ?: (int) $modx->getOption('site_start');
 $url = $modx->makeUrl($target, '', '', 'full');
-if ($mgrStillOpen) {
-    // Told, not hidden: anonymous to this site now, still authenticated to the manager, and only
-    // the reader can decide whether to end that.
-    $url .= (strpos($url, '?') === false ? '?' : '&') . 'mgr=open';
+
+// THE SIGN-OUT ENDS AT CHOWKIDAR, AND COMES BACK TO THE DOOR'S SIGN-IN (#1428;
+// claude/shared/design/door-standard-login.md §2). The door ends its session in every application
+// (back-channel), returns the browser to this context's sign-in entry with ?reason=signed_out, and
+// GoogleSSOStart sends it straight on to the door's sign-in page, which says "You are signed out".
+// The id_token is the hint when the session holds one; client_id alone ends the door session when it
+// does not. Nothing of MODx's own is drawn on the way.
+require_once rtrim(MODX_CORE_PATH, '/') . '/components/pustak/lib/SsoConfig.php';
+$sso = SsoConfig::forContext($modx);
+$endSession = $sso->fault === '' ? $sso->endSessionEndpoint() : '';
+if ($endSession !== '') {
+    $args = ['client_id' => $sso->clientId, 'post_logout_redirect_uri' => $url . (strpos($url, '?') === false ? '?' : '&') . 'reason=signed_out'];
+    if ($doorHint !== '') {
+        $args = ['id_token_hint' => $doorHint] + $args;
+    }
+    $modx->sendRedirect($endSession . (strpos($endSession, '?') === false ? '?' : '&') . http_build_query($args));
+    return '';
 }
-$modx->sendRedirect($url);
+
+// No door configured for this context: nothing to sign out of but this site.
+$modx->sendRedirect($modx->makeUrl((int) $modx->getOption('site_start'), '', '', 'full'));
 return '';

@@ -3,9 +3,9 @@
 
 WHY THIS EXISTS, stated plainly because it removes a protection.
 
-A bench has no way to sign anyone in. Google refuses to issue a callback to a private name, and
-the estate's mock-oidc provider guards on the internal zone suffix — a bench reached at
-`localhost:<port>` over an ssh forward is neither. So the front-end `sso-login` answers "Single
+A bench reached at `localhost:<port>` over an ssh forward has no way to sign anyone in: the door's
+client for a context names the context's own address as its callback, and localhost is not it. So
+the front-end `sso-login` answers "Single
 sign-on is not configured", and every page carrying page protection returns the unauthorized page
 instead of itself. The owner, 2026-08-20, opening the bench: *"not delivering anything on 8314"*. He
 was right: a reviewing surface that can show four anonymous pages out of 1,545 is not one.

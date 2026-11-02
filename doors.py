@@ -25,7 +25,7 @@ THE DOOR IS READ OUT OF THE ELEMENT'S OWN CODE — a small vocabulary of call na
 paths, so an element that stops checking its caller cannot keep a door it no longer has:
 
     Application::acceptedClient   identity:estate-CA client certificate (nginx verifies the chain)
-    GoogleToken::verify           the READER'S OWN Google id_token, verified here
+    GoogleToken::verify           the READER'S OWN id_token from the door, verified here
     isAuthenticated               a signed-in MODx session in this context
     none of these                 `open:` — a finding when it should not be, true when it should
 
@@ -71,7 +71,7 @@ GUARDS = {
     "Application::acceptedClient":
         "identity:estate-CA client certificate (nginx sets X-Client-Identity from a verified chain)",
     "GoogleToken::verify":
-        "token:the reader's own Google id_token, verified here against Google's keys",
+        "token:the reader's own id_token from the sign-in door, verified here against the door's keys",
     "isAuthenticated":
         "session:person (a signed-in MODx session in this context)",
 }
@@ -83,9 +83,9 @@ OPEN_REASONS = {
         "the sign-in flow itself — it cannot require a session, it is what creates one. Its "
         "isAuthenticated call REDIRECTS a visitor who is already signed in; it refuses nobody. "
         "What it must not do is trust anything the caller says, and it does not: the verification "
-        "is GoogleSSOCallback's, against Google.",
+        "is GoogleSSOCallback's, against the door's keys.",
     "GoogleSSOCallback":
-        "reached with a code from Google and nothing else. It establishes the caller rather than "
+        "reached with a code from the door and nothing else. It establishes the caller rather than "
         "checking one, so it has no door by construction; the audience check inside it is the "
         "boundary (a token minted for another application must not authenticate its holder here).",
     "GoogleSSOLogout":
@@ -107,6 +107,11 @@ OPEN_REASONS = {
                 "trades their renewal key for a new id_token and verifies it; with no reader it "
                 "returns silently. A renewal the provider refuses ENDS the session — the "
                 "next page then asks them to sign in — so it removes access, it never admits.",
+    "ssoBackchannelLogout": "the door's back-channel sign-out (service.json identity.routes "
+                            "/sso-backchannel-logout). The caller is the identity door, which presents "
+                            "no certificate and no session, so no caller is established; what admits a "
+                            "request is a logout_token signed under the door's published keys for this "
+                            "context's client, else 400 — and it only ever ENDS sessions, never opens one.",
     "ipaddr": "a page fragment; prints the visitor's own address.",
     "jumpNav": "a page fragment; builds navigation from resources the reader can already see.",
     "loginWidget": "a page fragment on the sign-in page — it renders the button that starts the flow.",

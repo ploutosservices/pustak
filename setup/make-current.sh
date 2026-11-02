@@ -22,13 +22,10 @@ set -euo pipefail
 # No default: this verb WRITES the docroot it is given, and a guessed one is overwritten
 # unasked. Name the docroot this run is about.
 MODX_ROOT="${MODX_ROOT:?MODX_ROOT not set — name the docroot this run writes; there is no default}"
-# WHICH INSTANCE THIS RUN BUILDS. 'bench' is the on-box copy that answers on the bench zone's vhosts;
-# 'local' is the third instance — same content, same http_host, reached at the declared localhost
-# port doors with no web server but its own `php -S`. Default 'bench', so nothing that ran before
-# this existed behaves differently.
+# The bench is the on-box copy nginx serves by name, the same setup as every other environment.
 MODX_PROFILE="${MODX_PROFILE:-bench}"
-case "$MODX_PROFILE" in bench|local) ;; *)
-  echo "make-current: MODX_PROFILE must be 'bench' or 'local' (got '$MODX_PROFILE'). Production is
+case "$MODX_PROFILE" in bench) ;; *)
+  echo "make-current: MODX_PROFILE must be 'bench' (got '$MODX_PROFILE'). Production is
   install/production-install.md and is infra-applied; this script must never point at it." >&2
   exit 2 ;;
 esac
@@ -44,8 +41,7 @@ REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # MODX_ESTATE — one name for one place — and refuses rather than guessing a path.
 . "$REPO/setup/estate-repo.sh"
 TAR="$ESTATE_REPO/install/modx-docroot.tar.gz"
-# The bench's names are the estate's (domains.bench_zone, domains.contexts), never typed here.
-BENCH_ZONE=$(python3 "$REPO/setup/estate-get.py" domains.bench_zone) || { echo "REFUSING: the estate declares no bench zone" >&2; exit 1; }
+# The bench's names are infra's (config scripts/modx-environment.py), never typed here.
 FIRST_CTX=$(python3 "$REPO/setup/estate-get.py" domains.contexts | head -1) || { echo "REFUSING: the estate declares no contexts" >&2; exit 1; }
 SEED="$ESTATE_REPO/install/modx-seed.sql.gz"
 export MYSQL_PWD="$MODX_DB_PASS"   # keeps the password off the process list / out of logs
@@ -155,9 +151,9 @@ if (!defined('MODX_URL_SCHEME')) {
 }
 if (!defined('MODX_HTTP_HOST')) {
     if(defined('PHP_SAPI') && (PHP_SAPI == "cli" || PHP_SAPI == "embed")) {
-        define('MODX_HTTP_HOST', 'modx.${BENCH_ZONE}');
+        define('MODX_HTTP_HOST', 'localhost');
     } else {
-        \$http_host = array_key_exists('HTTP_HOST', \$_SERVER) ? parse_url(\$url_scheme . \$_SERVER['HTTP_HOST'], PHP_URL_HOST) : 'modx.${BENCH_ZONE}';
+        \$http_host = array_key_exists('HTTP_HOST', \$_SERVER) ? parse_url(\$url_scheme . \$_SERVER['HTTP_HOST'], PHP_URL_HOST) : 'localhost';
         \$http_port = parse_url(\$url_scheme . \$_SERVER['HTTP_HOST'], PHP_URL_PORT);
         \$http_host .= in_array(\$http_port, [null, 80, 443]) ? '' : ':' . \$http_port;
         define('MODX_HTTP_HOST', \$http_host);
@@ -177,8 +173,7 @@ PHP
 
 # --- 3b) config.context.php + the library it requires — THE CONTEXT COMES FROM THE EDGE ----
 # config.context.php is one line requiring core/components/pustak/lib/EdgeContext.php, which takes
-# the context from HTTP_X_TENANT (nginx sets it on a vhost; setup/bench-server.php sets it from
-# BENCH_TENANT on a port door) and answers the estate's 404 page for anything else. The host
+# the context from HTTP_X_TENANT (nginx sets it from the name's tenant) and answers the estate's 404 page for anything else. The host
 # is never read, so there is no map to generate.
 #
 # THE LIBRARY IS PLACED HERE TOO. On a managed ground infra's modx-web role ships common/lib (tag
@@ -191,17 +186,22 @@ log "place common/lib -> core/components/pustak/lib"
 mkdir -p "$MODX_ROOT/core/components/pustak/lib"
 cp -p "$REPO"/common/lib/* "$MODX_ROOT/core/components/pustak/lib/"
 log "write config.context.php (the EdgeContext require)"
-python3 "$REPO/setup/config-context.py" --profile "$MODX_PROFILE" --write "$MODX_ROOT" \
+python3 "$REPO/setup/config-context.py" --write "$MODX_ROOT" \
   || die "config-context.py failed — without it every request falls back to the \`web\` context and
   serves 404 for every page in the estate. Refusing to finish a bench that cannot answer."
 
-# --- 4) data: load the seed through the ONE door — load + bench-domain bind + verify + cache.
+# The bench's application.php, from infra's derivation for this machine: load-seed binds from it.
+log "render the bench's application.php (setup/bench-application.py)"
+MODX_ROOT="$MODX_ROOT" python3 "$REPO/setup/bench-application.py" \
+  || die "bench-application.py failed — the bench's names cannot be bound"
+
+# --- 4) data: load the seed through the ONE door — load + environment bind + verify + cache.
 # Never load the seed here directly: a load without its domain bind is the failure that left production on bench hosts, and
 # load-seed.sh is where that pairing is enforced (for prod too, from production-install.md).
-log "load seed (bench profile) via setup/load-seed.sh"
+log "load seed via setup/load-seed.sh"
 FORCE=1 MODX_ROOT="$MODX_ROOT" MODX_DB_HOST="$MODX_DB_HOST" MODX_DB_USER="$MODX_DB_USER" \
   MODX_DB_PASS="$MODX_DB_PASS" MODX_DB_NAME="$MODX_DB_NAME" \
-  bash "$REPO/setup/load-seed.sh" --profile "$MODX_PROFILE"
+  bash "$REPO/setup/load-seed.sh"
 
 # --- 5) verify --------------------------------------------------------------------------------------
 # (the DB side — resource count and domain binding — is already asserted inside load-seed.sh)
@@ -212,7 +212,9 @@ count="$("${MYSQL[@]}" -N -e "SELECT COUNT(*) FROM \`$MODX_DB_NAME\`.modx_site_c
 # "serving" from "broken": sso-login 200 proves nginx + php-fpm + the Host->context map, and the
 # home 302 proves the seed's access control loaded with it. A 200 on home would mean the estate is
 # serving to anyone — the unprotected-pages fault — not that the box is healthy.
-PROBE_HOST="$FIRST_CTX.$BENCH_ZONE"
+PROBE_HOST=$(php -r '$a = include $argv[1]; echo $a["settings"]["contexts"][$argv[2]]["http_host"] ?? "";' \
+  "$MODX_ROOT/core/config/application.php" "$FIRST_CTX")
+[ -n "$PROBE_HOST" ] || die "application.php names no http_host for $FIRST_CTX"
 home="$(curl -s -o /dev/null -w '%{http_code}' -H "Host: $PROBE_HOST" http://localhost/ 2>/dev/null || echo 000)"
 supp="$(curl -s -o /dev/null -w '%{http_code}' -H "Host: $PROBE_HOST" http://localhost/sso-login 2>/dev/null || echo 000)"
 log "http $PROBE_HOST/sso-login -> $supp  (expect 200 — nginx/php-fpm/Host map)"
@@ -231,4 +233,4 @@ if [ "$home"  = "200" ]; then log "  WARN: home served anonymously — run setup
 log "install git hooks (core.hooksPath -> the estate repo's seat/hooks)"
 git -C "$ESTATE_REPO" config core.hooksPath "$ESTATE_REPO/seat/hooks"
 
-echo "make-current: MODx bench is current ($count resources). Flip *.$BENCH_ZONE DNS to this box to activate."
+echo "make-current: MODx bench is current ($count resources), answering at $PROBE_HOST and its sibling names."

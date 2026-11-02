@@ -1,23 +1,15 @@
 <?php
 /**
- * sso-provider-per-context — WHICH identity provider a context signs people in against.
+ * sso-provider-per-context — each context signs people in at the estate's door, as ITS OWN client.
  *
- * The owner's rule, 2026-08-11: names in the internal zone authenticate against the estate's OIDC
- * provider; public names authenticate against Google. Not a preference — Google will not accept a
- * redirect URI on a name it cannot resolve publicly, so a context on an internal name serves pages and
- * cannot sign anybody in.
- *
- * WHAT THIS PROVES, and the first item is the one that matters most:
- *   - PRODUCTION IS UNTOUCHED. A public host with no new settings resolves to exactly the Google
- *     endpoints, client and issuers it resolved to before this change existed.
- *   - the choice is PER CONTEXT — the constraint infra stated, and the reason the previous
- *     attempt was abandoned: one MODx serves four contexts and they will not all be internal.
- *   - an internal-zone context on sso.provider=oidc gets ITS OWN client id and secret and the estate
- *     issuer, not Google's.
- *   - the zone guard REFUSES rather than silently falling back: sso.provider=oidc on a public host
- *     is a stated fault, because substituting a different identity provider without saying so is
- *     the class of thing this estate keeps getting caught by.
- *   - a missing setting NAMES ITSELF (the failures-name-themselves rule, one repo over).
+ * One provider, the door, on every name (Chowkidar 2030 step 4, #1380; claude-shared
+ * design/chowkidar-step4-skunkworks-apps.md). WHAT THIS PROVES:
+ *   - a context resolves to its own door client, endpoints and issuer — on a PUBLIC name too, which
+ *     the retired rule ("public names use Google") refused;
+ *   - Google is reached by nothing: no Google endpoint, issuer or client, whatever settings a
+ *     ground still carries (production holds sso.google_* rows until they are retired);
+ *   - the choice is PER CONTEXT: one MODx, four contexts, four clients;
+ *   - a context with no door client is a NAMED fault, never a fallback;
  *   - the callback URL has ONE definition, so the two halves of a sign-in cannot disagree.
  *
  * A known-answer control runs FIRST, so a harness that can only pass is as visible as one that can
@@ -47,110 +39,71 @@ class FakeModx {
     public function getOption($key) { return $this->opts[$key] ?? null; }
 }
 
-$PUBLIC = [
+$DOOR = [
+    'sso.oidc_issuer'            => 'https://door.example.test/realms/dev',
+    'sso.oidc_auth_endpoint'     => 'https://door.example.test/realms/dev/auth',
+    'sso.oidc_token_endpoint'    => 'https://door.example.test/realms/dev/token',
+    'sso.oidc_userinfo_endpoint' => 'https://door.example.test/realms/dev/userinfo',
+    'sso.oidc_jwks_uri'          => 'https://door.example.test/realms/dev/certs',
+    'sso.callback_path'          => 'sso-callback',
+    'estate.internal_zone'       => '.internal.test',
+];
+$PUBLIC = $DOOR + [
     'http_host'              => 'www.example.org',
     'site_url'               => 'https://www.example.org/',
+    'sso.oidc_client_id'     => 'modx-public',
+    'sso.oidc_client_secret' => 'public-secret',
+    // What production still carries until those rows are retired. Nothing may read them.
     'sso.google_client_id'   => 'g-client',
     'sso.google_client_secret' => 'g-secret',
-    'sso.callback_path'      => 'sso-callback',
-    'estate.internal_zone'   => '.internal.test',
+    'sso.auth_endpoint'      => 'https://elsewhere.example/authorize',
+    'sso.issuer'             => 'https://elsewhere.example',
 ];
-$INTERNAL = [
+$INTERNAL = $DOOR + [
     'http_host'                  => 'ctx.app.internal.test',
     'site_url'                   => 'http://ctx.app.internal.test/',
-    'sso.google_client_id'       => 'g-client',
-    'sso.google_client_secret'   => 'g-secret',
-    'sso.callback_path'          => 'sso-callback',
-    'sso.provider'               => 'oidc',
-    'sso.oidc_issuer'            => 'http://oidc.app.internal.test',
-    'sso.oidc_auth_endpoint'     => 'http://oidc.app.internal.test/authorize',
-    'sso.oidc_token_endpoint'    => 'http://oidc.app.internal.test/token',
-    'sso.oidc_userinfo_endpoint' => 'http://oidc.app.internal.test/userinfo',
-    'sso.oidc_jwks_uri'          => 'http://oidc.app.internal.test/jwks',
     'sso.oidc_client_id'         => 'modx-ctx',
     'sso.oidc_client_secret'     => 'ctx-secret',
-    'estate.internal_zone'       => '.internal.test',
 ];
 
 // ── 0. the control ─────────────────────────────────────────────────────────────────────────────
-// If the resolver could only ever answer "google", every assertion below would pass while proving
-// nothing. Prove first that BOTH answers are reachable.
+// If the resolver ignored its context and answered one fixed client, every assertion below about a
+// context's OWN client would pass while proving nothing. Prove first that two contexts differ.
 $c0a = SsoConfig::forContext(new FakeModx($PUBLIC));
 $c0b = SsoConfig::forContext(new FakeModx($INTERNAL));
-check($c0a->provider === 'google' && $c0b->provider === 'oidc',
-      'control: the resolver reaches BOTH providers',
-      "public={$c0a->provider} internal={$c0b->provider}");
+check($c0a->clientId === 'modx-public' && $c0b->clientId === 'modx-ctx',
+      'control: the resolver answers each context with its own client',
+      "public={$c0a->clientId} internal={$c0b->clientId}");
 
-// ── 1. production is untouched ─────────────────────────────────────────────────────────────────
+// ── 1. a public name signs in at the door, as its own client ──────────────────────────────────
 $c = SsoConfig::forContext(new FakeModx($PUBLIC));
-check($c->provider === 'google'
-   && $c->clientId === 'g-client' && $c->clientSecret === 'g-secret'
-   && $c->authEndpoint === 'https://accounts.google.com/o/oauth2/v2/auth'
-   && $c->tokenEndpoint === 'https://oauth2.googleapis.com/token'
-   && $c->issuers === ['accounts.google.com', 'https://accounts.google.com']
-   && $c->fault === '',
-      'a public context resolves to Google, byte for byte as before',
-      json_encode([$c->provider, $c->clientId, $c->authEndpoint, $c->tokenEndpoint, $c->issuers]));
-
-// A public context is NOT offered the bench overrides even if somebody sets them.
-$withOverrides = $PUBLIC + ['sso.auth_endpoint' => 'http://mock-oidc.app.internal.test/authorize',
-                            'sso.token_endpoint' => 'http://mock-oidc.app.internal.test/token',
-                            'sso.issuer' => 'http://mock-oidc.app.internal.test'];
-$c = SsoConfig::forContext(new FakeModx($withOverrides));
-check($c->authEndpoint === 'https://accounts.google.com/o/oauth2/v2/auth'
-   && !in_array('http://mock-oidc.app.internal.test', $c->issuers, true),
-      'the bench overrides do NOT reach a public host',
-      $c->authEndpoint . ' ' . json_encode($c->issuers));
-
-// ── 2. an internal context gets the estate provider, with its OWN client ───────────────────────
-$c = SsoConfig::forContext(new FakeModx($INTERNAL));
 check($c->provider === 'oidc'
-   && $c->clientId === 'modx-ctx' && $c->clientSecret === 'ctx-secret'
-   && $c->authEndpoint === 'http://oidc.app.internal.test/authorize'
-   && $c->tokenEndpoint === 'http://oidc.app.internal.test/token'
-   && $c->userinfoEndpoint === 'http://oidc.app.internal.test/userinfo'
-   && $c->jwksUri === 'http://oidc.app.internal.test/jwks'
-   && $c->issuers === ['http://oidc.app.internal.test']
+   && $c->clientId === 'modx-public' && $c->clientSecret === 'public-secret'
+   && $c->authEndpoint === 'https://door.example.test/realms/dev/auth'
+   && $c->tokenEndpoint === 'https://door.example.test/realms/dev/token'
+   && $c->issuers === ['https://door.example.test/realms/dev']
    && $c->fault === '',
-      'an internal-zone context resolves to the estate OIDC provider with its own client',
-      json_encode([$c->provider, $c->clientId, $c->authEndpoint, $c->issuers]));
+      'a PUBLIC context resolves to the door with its own client — no zone rule refuses it',
+      json_encode([$c->provider, $c->clientId, $c->authEndpoint, $c->issuers, $c->fault]));
 
-check($c->clientId !== 'g-client' && !in_array('accounts.google.com', $c->issuers, true),
-      "Google's client and issuers are NOT carried into the oidc path", $c->clientId);
+// ── 2. Google is reached by nothing ────────────────────────────────────────────────────────────
+$all = json_encode([$c->authEndpoint, $c->tokenEndpoint, $c->issuers, $c->clientId, $c->jwksUri]);
+check(strpos($all, 'google') === false && strpos($all, 'g-client') === false && strpos($all, 'elsewhere') === false,
+      'no Google endpoint, issuer or client, and no retired trio, whatever rows the ground still holds', $all);
 
 // ── 3. per CONTEXT, not per install ────────────────────────────────────────────────────────────
-// The two resolutions above came from two settings maps, which is exactly what a MODx context
-// setting is. This asserts the property the ticket asked for: the same install, two contexts, two
-// answers, neither disturbing the other.
 $a = SsoConfig::forContext(new FakeModx($INTERNAL));
-$b = SsoConfig::forContext(new FakeModx($PUBLIC));
-check($a->provider === 'oidc' && $b->provider === 'google',
-      'two contexts of one install resolve independently');
+check($a->clientId === 'modx-ctx' && $a->clientSecret === 'ctx-secret' && $a->fault === ''
+   && $a->userinfoEndpoint === 'https://door.example.test/realms/dev/userinfo'
+   && $a->jwksUri === 'https://door.example.test/realms/dev/certs',
+      'two contexts of one install resolve independently, each with its own client and secret');
 
-// ── 4. the zone guard REFUSES, it does not fall back ───────────────────────────────────────────
-$crossed = $PUBLIC + ['sso.provider' => 'oidc',
-                      'sso.oidc_issuer' => 'http://oidc.app.internal.test',
-                      'sso.oidc_auth_endpoint' => 'http://oidc.app.internal.test/authorize',
-                      'sso.oidc_token_endpoint' => 'http://oidc.app.internal.test/token',
-                      'sso.oidc_client_id' => 'x', 'sso.oidc_client_secret' => 'y'];
-$c = SsoConfig::forContext(new FakeModx($crossed));
-check($c->fault !== '' && strpos($c->fault, 'PUBLIC') !== false,
-      'sso.provider=oidc on a PUBLIC host is refused, not silently sent to Google', $c->fault);
-check(strpos($c->fault, 'www.example.org') !== false,
-      'the refusal names the host it refused', $c->fault);
-
-// ── 4b. AND THE MIRROR, which is the one that actually happened ────────────────────────────────
-// The owner, 2026-08-14: a bench context sent sign-in to Google — 302 to accounts.google.com with a
-// redirect_uri on an internal-zone name, which Google refuses for any private name. That sign-in cannot
-// complete; it can only end on Google's error page, naming neither the estate nor the setting.
-$stranded = $INTERNAL;
-unset($stranded['sso.provider']);                     // exactly what a ground with no
-$c = SsoConfig::forContext(new FakeModx($stranded));  // MODX_SSO_OIDC_CONTEXTS produces
-check($c->fault !== '' && strpos($c->fault, 'INTERNAL') !== false,
-      'the default provider on an INTERNAL host is refused, not sent to a Google that cannot answer',
-      $c->fault);
-check(strpos($c->fault, 'MODX_SSO_OIDC_CONTEXTS') !== false,
-      '  and the refusal names the variable that fixes it', $c->fault);
+// ── 4. no door client is a named fault, never a fallback ───────────────────────────────────────
+$none = ['http_host' => 'www.example.org', 'site_url' => 'https://www.example.org/',
+         'sso.google_client_id' => 'g-client', 'sso.google_client_secret' => 'g-secret'];
+$c = SsoConfig::forContext(new FakeModx($none));
+check($c->fault !== '' && strpos($c->fault, 'sso.oidc_client_id') !== false && $c->authEndpoint === '',
+      'a context with no door client (only the old Google rows) is a named fault, not Google', $c->fault);
 
 // ── 5. a missing setting names itself ──────────────────────────────────────────────────────────
 $partial = $INTERNAL;
@@ -159,7 +112,7 @@ $c = SsoConfig::forContext(new FakeModx($partial));
 check($c->fault !== ''
    && strpos($c->fault, 'sso.oidc_client_secret') !== false
    && strpos($c->fault, 'sso.oidc_token_endpoint') !== false,
-      'an incomplete oidc context names EVERY missing setting', $c->fault);
+      'an incomplete context names EVERY missing setting', $c->fault);
 check(strpos($c->fault, 'sso.oidc_issuer') === false,
       'and does not name the ones that are present', $c->fault);
 
@@ -168,7 +121,7 @@ check(strpos($c->fault, 'sso.oidc_issuer') === false,
 // "verify the token" into a change request on another agent, which is a gate on finished work.
 // Configured wins (deterministic, no network); absent falls to the issuer's discovery document.
 $c = SsoConfig::forContext(new FakeModx($INTERNAL));
-check($c->jwksUri === 'http://oidc.app.internal.test/jwks',
+check($c->jwksUri === 'https://door.example.test/realms/dev/certs',
       'a configured sso.oidc_jwks_uri is used as-is, with no network call', $c->jwksUri);
 
 $nojwks = $INTERNAL; unset($nojwks['sso.oidc_jwks_uri']);
@@ -182,32 +135,22 @@ check($c->jwksUri === '' && $c->fault === '',
 
 // And with a LIVE provider it really does discover. Skipped rather than failed where the estate's
 // provider is unreachable, because a test that needs the network must say which it did.
-// MOCK_OIDC_URL names the ground's mock provider (the staging test environment declares it).
-$mock = rtrim((string) getenv('MOCK_OIDC_URL'), '/');
+// MODX_DOOR_ISSUER names the door's issuer on this ground: run-all.sh exports it from the first
+// context's sso.oidc_issuer row; a ground that cannot answer leaves it unset and this is skipped,
+// said aloud. (It read MOCK_OIDC_URL until the mock was retired.)
+$door = rtrim((string) getenv('MODX_DOOR_ISSUER'), '/');
 $live = $INTERNAL;
 unset($live['sso.oidc_jwks_uri']);
-$live['sso.oidc_issuer'] = $mock;
-$probe = $mock === '' ? false : @file_get_contents($mock . '/.well-known/openid-configuration');
-if ($probe === false) {
-    echo "  skip  discovery against the live provider (" . ($mock ?: 'MOCK_OIDC_URL unset') . " unreachable)\n";
+$live['sso.oidc_issuer'] = $door;
+$probe = $door === '' ? false : @file_get_contents($door . '/.well-known/openid-configuration');
+$published = $probe === false ? '' : (string) (json_decode($probe, true)['jwks_uri'] ?? '');
+if ($probe === false || $published === '') {
+    echo "  skip  discovery against the live provider (" . ($door ?: 'MODX_DOOR_ISSUER unset') . " unreachable or publishes no jwks_uri)\n";
 } else {
     $c = SsoConfig::forContext(new FakeModx($live));
-    check($c->jwksUri === $mock . '/jwks',
+    check($c->jwksUri === $published,
           'with no setting, the JWKS URL is DISCOVERED from the live issuer', $c->jwksUri);
 }
-
-// ── 5b. the internal zone is the SETTING, not a suffix typed in code ───────────────────────────
-// Another estate's zone must work with no code change, and no zone must mean no internal name.
-$other = array_merge($INTERNAL, ['http_host' => 'ctx.corp.internal', 'site_url' => 'http://ctx.corp.internal/',
-                                 'estate.internal_zone' => 'corp.internal']);
-$c = SsoConfig::forContext(new FakeModx($other));
-check(!$c->fault && $c->provider === 'oidc',
-      'a different estate\'s zone (corp.internal) signs its internal names in by oidc', (string) $c->fault);
-$nozone = $INTERNAL; unset($nozone['estate.internal_zone']);
-$c = SsoConfig::forContext(new FakeModx($nozone));
-check($c->fault !== null && strpos($c->fault, 'estate.internal_zone is not set') !== false,
-      'with no estate.internal_zone, no name is internal: oidc is refused and the refusal names the setting',
-      (string) $c->fault);
 
 // ── 6. one definition of the callback URL ──────────────────────────────────────────────────────
 // GoogleSSOStart and GoogleSSOCallback used to build this separately, kept identical by a comment
@@ -222,10 +165,9 @@ check(SsoConfig::redirectUri(new FakeModx($INTERNAL)) === 'http://ctx.app.intern
 // same authority — which is every context on production and on staging — so they are the proof
 // that building the callback from site_url changed nothing on any ground that exists today.
 //
-// The third fixture is the local instance, where they DIVERGE by design: http_host must stay in
-// the bench zone (12-sso.py refuses oidc against a public host; regenerate-seed.sh refuses a seed
-// from a ground outside it) while the address a browser can reach is a localhost port. Before this
-// case the callback named worldview.modx.internal.test and the sign-in could not complete.
+// The third fixture is a context whose address DIVERGES from its http_host (no ground binds one
+// that way since the bench port doors were retired, #1276; SsoConfig still builds the callback from
+// site_url, and this pins that it does).
 $LOCAL = array_merge($INTERNAL, ['http_host' => 'worldview.modx.internal.test',
                                  'site_url'  => 'http://localhost:8314/']);
 check(SsoConfig::redirectUri(new FakeModx($LOCAL)) === 'http://localhost:8314/sso-callback',
@@ -243,18 +185,6 @@ $NOSITE = array_merge($INTERNAL, ['site_url' => '']);
 check(SsoConfig::redirectUri(new FakeModx($NOSITE)) === 'https://ctx.app.internal.test/sso-callback',
       'an empty site_url falls back to http_host and a well-formed URL, not to nonsense',
       SsoConfig::redirectUri(new FakeModx($NOSITE)));
-
-// ── 7. an unset provider is Google, and so is an unrecognised one ──────────────────────────────
-// The default decides what SILENCE means, and silence must mean the safe, unchanged thing.
-$c = SsoConfig::forContext(new FakeModx($PUBLIC + ['sso.provider' => '']));
-check($c->provider === 'google' && $c->fault === '', 'an empty sso.provider means Google');
-// array_merge, NOT `+`. PHP's union operator keeps the LEFT side's value for a key that already
-// exists, so `$INTERNAL + ['sso.provider' => 'saml']` is still 'oidc' — this assertion passed
-// nothing for its first run and said so, which is the only reason it is written correctly now.
-$c = SsoConfig::forContext(new FakeModx(array_merge($INTERNAL, ['sso.provider' => 'saml'])));
-check($c->provider === 'google',
-      'an unrecognised provider falls to Google rather than half-configuring something else',
-      $c->provider);
 
 // ── the deep-link destination is read BEFORE login replaces the session ──────────────────
 // The owner: a signed-out visit to an internal context's /capability signed him in and landed him on /home.

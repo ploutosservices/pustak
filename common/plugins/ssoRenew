@@ -3,14 +3,14 @@
  * Event: OnWebPageInit.
  * It runs before any snippet or the bookkeeping-names plugin reads $_SESSION['sso.id_token'].
  *
- * WHY. Google's id_token lives an hour. The bookkeeping-names plugin (and the folder search snippet) verify it on every page and
+ * WHY. The door's id_token is short-lived (Google's lived an hour, before the door replaced it). The bookkeeping-names plugin (and the folder search snippet) verify it on every page and
  * END THE SESSION when it fails — the owner's ruling: "if the validation fails at that time, they
  * lose access". Nothing renewed it, so a reader was signed out every hour; the owner, 2026-10-05, on
  * being signed out mid-visit: "should google token be renewed on each page load, preferably in
  * background". The ruling is untouched: a token that cannot be renewed still ends the session.
  *
  * WHAT IT DOES. Only for a reader authenticated in THIS context who holds a renewal key
- * (sso.refresh_token, kept by GoogleSSOCallback since sign-in asks for offline access), and only
+ * (sso.refresh_token, kept by GoogleSSOCallback from the door's token response), and only
  * when the id_token has under $renewWithin seconds left — so a page costs a call to the provider
  * about once an hour, not once a load. The key is traded at the context's own token endpoint with
  * its own client (SsoConfig, the one place that resolves a context's provider). The new id_token is
@@ -28,6 +28,36 @@
 $renewWithin = 300;          // seconds before expiry at which the token is renewed
 
 $ctxKey = $modx->context ? (string) $modx->context->get('key') : '';
+
+// A DOOR SESSION THE DOOR HAS ENDED, FIRST — before any return below. ssoBackchannelLogout deletes
+// the session rows it names, but a request in flight when it ran writes its session back; the sid
+// it recorded in the registry is what ends that one here, on its next page.
+// claude/shared/design/back-channel-logout-skunkworks.md.
+$doorSid = (string) ($_SESSION['sso.sid'] ?? '');
+if ($doorSid !== '') {
+    $registry = $modx->getService('registry', 'registry.modRegistry');
+    $register = $registry ? $registry->getRegister('pustak', 'registry.modDbRegister') : null;
+    if ($register && $register->connect()) {
+        $register->subscribe('/pustak/ended-sid/' . $doorSid);
+        $ended = $register->read(['poll_limit' => 1, 'msg_limit' => 1, 'remove_read' => false]);
+        $register->unsubscribe('/pustak/ended-sid/' . $doorSid);
+        if (!empty($ended)) {
+            $who = (string) ($_SESSION['sso.verified_email'] ?? '');
+            $modx->log(modX::LOG_LEVEL_ERROR, "ssoRenew: door session $doorSid" . ($who !== '' ? " ($who)" : '')
+                . ' was ended at the door — ending the MODx session; they sign in again.');
+            if ($ctxKey !== '' && $ctxKey !== 'mgr' && $modx->user && $modx->user->isAuthenticated($ctxKey)) {
+                $modx->user->removeSessionContext($ctxKey);
+            }
+            unset($_SESSION['sso.id_token'], $_SESSION['sso.id_token_exp'], $_SESSION['sso.verified_email'],
+                  $_SESSION['sso.refresh_token'], $_SESSION['sso.sid'], $_SESSION['sso.door_hint'],
+                  $_SESSION['sso.impersonator']);
+            return;
+        }
+    } else {
+        $modx->log(modX::LOG_LEVEL_ERROR, "ssoRenew: the registry could not be read, so whether door session $doorSid was ended at the door is not known");
+    }
+}
+
 if ($ctxKey === '' || $ctxKey === 'mgr' || !$modx->user || !$modx->user->isAuthenticated($ctxKey)) {
     return;
 }
@@ -88,26 +118,22 @@ if ($http !== 200 || !is_array($tok) || empty($tok['id_token'])) {
 
 require_once rtrim(MODX_CORE_PATH, '/') . '/components/pustak/lib/GoogleToken.php';
 $why = null;
-if ($sso->provider === 'oidc') {
-    $jwksUri = $sso->jwksUri;
-    $jwksSource = $jwksUri === '' ? null : function () use ($jwksUri) {
-        $c = curl_init($jwksUri);
-        curl_setopt_array($c, [CURLOPT_RETURNTRANSFER => true, CURLOPT_TIMEOUT => 8,
-                               CURLOPT_HTTPHEADER => ['Accept: application/json']]);
-        $b  = curl_exec($c);
-        $ok = curl_getinfo($c, CURLINFO_RESPONSE_CODE) === 200;
-        curl_close($c);
-        $j = ($ok && is_string($b)) ? json_decode($b, true) : null;
-        return is_array($j) ? $j : null;
-    };
-    if ($jwksSource === null) {
-        $end('the oidc provider has no keys address, so the new token cannot be checked');
-        return;
-    }
-    $got = \Kuber\Core\GoogleToken::verify((string) $tok['id_token'], [$sso->clientId], $why, $jwksSource, $sso->issuers);
-} else {
-    $got = \Kuber\Core\GoogleToken::verify((string) $tok['id_token'], [$sso->clientId], $why);
+$jwksUri = $sso->jwksUri;
+$jwksSource = $jwksUri === '' ? null : function () use ($jwksUri) {
+    $c = curl_init($jwksUri);
+    curl_setopt_array($c, [CURLOPT_RETURNTRANSFER => true, CURLOPT_TIMEOUT => 8,
+                           CURLOPT_HTTPHEADER => ['Accept: application/json']]);
+    $b  = curl_exec($c);
+    $ok = curl_getinfo($c, CURLINFO_RESPONSE_CODE) === 200;
+    curl_close($c);
+    $j = ($ok && is_string($b)) ? json_decode($b, true) : null;
+    return is_array($j) ? $j : null;
+};
+if ($jwksSource === null) {
+    $end('the door has no keys address, so the new token cannot be checked');
+    return;
 }
+$got = \Kuber\Core\GoogleToken::verify((string) $tok['id_token'], [$sso->clientId], $why, $jwksSource, $sso->issuers);
 if ($got === null) {
     $end('the new id_token did not verify: ' . (string) $why);
     return;
@@ -121,6 +147,9 @@ $seg = strtr(explode('.', (string) $tok['id_token'])[1] ?? '', '-_', '+/');
 $payload = json_decode((string) base64_decode($seg . str_repeat('=', (4 - strlen($seg) % 4) % 4), true), true);
 $_SESSION['sso.id_token']     = (string) $tok['id_token'];
 $_SESSION['sso.id_token_exp'] = (int) ($payload['exp'] ?? 0);
+if (!empty($tok['access_token'])) {
+    $_SESSION['sso.access_token'] = (string) $tok['access_token'];   // the token exchange's subject
+}
 if (!empty($tok['refresh_token'])) {
     $_SESSION['sso.refresh_token'] = (string) $tok['refresh_token'];   // a provider may rotate it
 }

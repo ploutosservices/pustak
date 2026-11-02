@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-12 — Google SSO wiring.
+12 — sign-in wiring: every gated context through the estate's door (Chowkidar).
 
-Creates the `sso.*` system settings and, per SSO-gated context, four public resources:
+Creates the `sso.*` system settings and, per SSO-gated context, five public resources:
   - the login entry  (runs [[!GoogleSSOStart]])    -> branded sign-in screen -> the provider
   - the callback     (runs [[!GoogleSSOCallback]]) -> completes login, establishes the session
   - the logout entry (runs [[!GoogleSSOLogout]])   -> tears down the web session
   - the refusal page (runs [[!unauthorizedNotice]])-> says WHY a page was refused, to whom
+  - the back-channel (runs [[!ssoBackchannelLogout]]) -> the door's sign-out call ends the session
 and repoints login_page at the login entry, logout_page at the logout entry, and unauthorized_page
 at the refusal page — the full SSO-only cutover (the Login package's form is retired). A blocked
 anonymous visitor still reaches the branded sign-in; a blocked SIGNED-IN one now gets told that
@@ -16,10 +17,8 @@ The snippets themselves live in common/snippets/ and are deployed by import.py (
 apply-modx-elements.sh (prod). This script is the wiring (settings + resources + context
 settings). Idempotent — safe to re-run.
 
-SECRETS ARE NEVER HARD-CODED. client id/secret come from the environment; if unset, the existing
-setting value is left untouched (so a re-run never blanks a configured secret):
-  MODX_SSO_CLIENT_ID       — the shared project_sso web-client id   (Vaultwarden)
-  MODX_SSO_CLIENT_SECRET   — the shared project_sso web-client secret
+SECRETS ARE NEVER HARD-CODED. Each context's client secret at the door comes from the environment
+(MODX_SSO_OIDC_SECRET_<CTX>, below); unset MODX_SSO_OIDC leaves every context's sso.oidc_* untouched.
 WHO MAY SIGN IN is not set here: it is the MODx user and its membership, and nothing else. The
   sso.allowed_emails / sso.allowed_domains list is retired; setup/02 deletes its rows.
 Deploy knobs (env, with defaults):
@@ -40,20 +39,8 @@ import pymysql
 # and refuses to protect a context that has no such container (it would lock the door from inside).
 import settings_guard
 from access_model import SUPPORT_ALIAS
-import domains
 from domains import db_config
-from estate import PROTECTED_CONTEXTS, SYSTEM_SETTINGS
-# THE INTERNAL ZONE IS THE ESTATE'S DECLARATION (estate.json system_settings estate.internal_zone,
-# which setup/02 writes as the MODx setting SsoConfig reads) — never a suffix typed here. No zone,
-# no internal name: every guard below then refuses, closed, and says which setting is missing.
-_ZONE = str(SYSTEM_SETTINGS.get('estate.internal_zone') or '').strip().lower()
-if _ZONE and not _ZONE.startswith('.'):
-    _ZONE = '.' + _ZONE
-_ZONE_SAID = f"the internal zone ({_ZONE})" if _ZONE else "the internal zone (estate.internal_zone is not declared, so no name is internal)"
-
-
-def internal(host):
-    return bool(_ZONE) and str(host or '').lower().endswith(_ZONE)
+from estate import PROTECTED_CONTEXTS
 
 DB = db_config()
 
@@ -75,6 +62,11 @@ LOGOUT_PATH   = os.environ.get('MODX_SSO_LOGOUT_PATH', 'sso-logout').strip('/')
 # page, and the refusal starts again. A separate resource is what lets the refusal say something.
 DENIED_PATH   = os.environ.get('MODX_SSO_DENIED_PATH', 'sso-unauthorized').strip('/')
 REPOINT       = os.environ.get('MODX_SSO_REPOINT', '1') == '1'
+# THE DOOR'S BACK-CHANNEL SIGN-OUT ADDRESS, and NOT a variable: it is declared in service.json
+# identity.routes (the door is told it, and access_model reads it from there), so an override here
+# could only make the page and its declaration disagree. Created in every gated context; one whose
+# sso.provider is not oidc answers 400 from the snippet. design/back-channel-logout-skunkworks.md.
+BACKCHANNEL_PATH = 'sso-backchannel-logout'
 
 conn = pymysql.connect(**DB)
 cur = conn.cursor()
@@ -102,8 +94,6 @@ def set_setting(key, value, xtype='textfield'):
 
 
 # --- settings ---------------------------------------------------------------------------------
-set_setting('sso.google_client_id',     os.environ.get('MODX_SSO_CLIENT_ID'))          # secret-ish; only if provided
-set_setting('sso.google_client_secret', os.environ.get('MODX_SSO_CLIENT_SECRET'), 'password')
 set_setting('sso.auto_provision',       os.environ.get('MODX_SSO_AUTO_PROVISION', '0'), 'combo-boolean')
 # THE GROUP AN AUTO-PROVISIONED USER LANDS IN, and it was a literal naming a group that does not
 # exist. `04-access-control.py` RENAMES a legacy `Members` group to `allContextMember` (its
@@ -127,63 +117,10 @@ if _PROVISION_GROUP:
 set_setting('sso.provision_usergroup',  _PROVISION_GROUP)
 set_setting('sso.callback_path',        CALLBACK_PATH)
 
-# --- the identity provider's endpoints -------------------------------------------
-#
-# Nothing wrote these until now, and the gap was invisible in the worst way: `GoogleSSOStart` and
-# `GoogleSSOCallback` fall back to Google when the settings are absent, so a bench with no endpoint
-# settings SILENTLY signs in against real Google. After every `restore_modx_dev` that is the state,
-# and the two suites that drive a real sign-in (`sso-verified-email.sh`, `auth-end-to-end.sh`)
-# refuse to run rather than authenticate a real person with no password — so the estate's only
-# end-to-end proof of its own login has been unrunnable since the last restore, quietly.
-#
-# ONE variable, not three. `MODX_SSO_IDP` is the provider's base URL and the three settings are read
-# out of its `/.well-known/openid-configuration`. Three hand-set variables could disagree with each
-# other and with the provider, which is the defect class this whole ticket has been unwinding; a
-# discovery document cannot be internally inconsistent. Unset = leave them alone (production).
-#
-# THE GUARD IS THE SAME ONE THE SNIPPET USES, restated here because a writer that can point
-# production at a mock is more dangerous than the gap it closes: `GoogleSSOCallback` honours these
-# settings ONLY when `http_host` is in the internal zone, and does NOT verify the id_token signature,
-# trusting instead that the token came over TLS from Google's own endpoint. So this refuses to write
-# them at all unless every gated context's http_host is an internal-zone host. On production it is a no-op
-# that says so.
-IDP = os.environ.get('MODX_SSO_IDP', '').strip().rstrip('/')
-if IDP:
-    import json as _json
-    import urllib.request as _url
-
-    cur.execute("SELECT context_key, value FROM modx_context_setting WHERE `key`='http_host' "
-                "AND context_key IN (" + ','.join(['%s'] * len(CONTEXTS)) + ")", tuple(CONTEXTS)) \
-        if CONTEXTS else None
-    hosts = dict(cur.fetchall()) if CONTEXTS else {}
-    public = {c: h for c, h in hosts.items() if not internal(h)}
-    if public:
-        raise SystemExit(
-            f"12-sso: REFUSING to write IdP endpoints — {', '.join(f'{c}={h}' for c, h in public.items())} "
-            f"is not in {_ZONE_SAID}.\n"
-            f"        GoogleSSOCallback honours sso.auth_endpoint/token_endpoint/issuer only on an\n"
-            f"        internal host and does not verify the id_token signature — it trusts that the\n"
-            f"        token came from Google over TLS. Writing these against a public host would\n"
-            f"        make any address typed at the provider a verified identity on that site."
-        )
-    try:
-        with _url.urlopen(f'{IDP}/.well-known/openid-configuration', timeout=10) as fh:
-            disco = _json.load(fh)
-        auth, token, issuer = (disco['authorization_endpoint'], disco['token_endpoint'],
-                               disco['issuer'])
-    except Exception as exc:                                    # noqa: BLE001 — any failure is fatal
-        raise SystemExit(
-            f"12-sso: MODX_SSO_IDP={IDP} did not yield a usable discovery document ({exc}).\n"
-            f"        Refusing rather than writing a guess: an endpoint that does not answer leaves\n"
-            f"        sign-in falling back to real Google, which is exactly the silent state this\n"
-            f"        exists to end."
-        )
-    set_setting('sso.auth_endpoint',  auth)
-    set_setting('sso.token_endpoint', token)
-    set_setting('sso.issuer',         issuer)
-    print(f'  IdP endpoints written from {IDP}/.well-known/openid-configuration (issuer={issuer})')
-else:
-    print('  IdP endpoints untouched (MODX_SSO_IDP unset) — sign-in uses Google')
+# --- the bench's system trio (sso.auth_endpoint/token_endpoint/issuer) is RETIRED ---------------
+# It pointed the Google path at a bench provider. There is no Google path now: every context signs
+# in at the door through sso.oidc_* below. MODX_SSO_IDP is no longer read; rows a ground still holds
+# are inert (SsoConfig never reads them).
 print(f'Settings ensured (contexts={CONTEXTS}, callback=/{CALLBACK_PATH}, login=/{LOGIN_PATH}, repoint={REPOINT}).')
 
 
@@ -251,24 +188,20 @@ def set_ctx(ctx, key, value):
                     (ctx, key, value))
 
 
-# ── The estate OIDC provider, PER CONTEXT ───────────────────────────────────────────────
-# The owner's rule, 2026-08-11: names in the internal zone authenticate against the estate's OIDC provider;
-# public names authenticate against Google. Not a preference — Google will not accept a redirect URI
-# on a name it cannot resolve publicly, so the move of the claude context to an internal-zone name
-# left it serving pages and unable to sign anybody in.
+# ── The door, PER CONTEXT ───────────────────────────────────────────────────────────────────────
+# Every gated context signs in at the estate's door (Chowkidar 2030 step 4), each as its own
+# client. WRITTEN AS CONTEXT SETTINGS, NEVER SYSTEM SETTINGS: one MODx serves four contexts, and
+# `$modx->getOption()` resolves a context setting over the system value, so per-context is the
+# mechanism.
 #
-# WRITTEN AS CONTEXT SETTINGS, NEVER SYSTEM SETTINGS, and that is the whole reason the earlier
-# attempt was abandoned: one MODx serves four contexts, `sso.auth_endpoint` and friends are
-# per-install, and pointing the install at another provider would have taken `family` and
-# `corporate` with it. `$modx->getOption()` resolves a context setting over the system value, so
-# per-context is the mechanism; what was missing was a client id and secret that are not Google's.
-#
-# MODX_SSO_OIDC=<issuer base>  — read its discovery document and write the endpoints, exactly as the
-#                                bench block above does, because a discovery document cannot be
-#                                internally inconsistent while three hand-typed URLs can.
-# MODX_SSO_OIDC_CONTEXTS       — comma-separated contexts to point at it. Required: this is an
-#                                identity change and "all of them" must never be the default.
-# MODX_SSO_OIDC_CLIENT_<CTX>   — that context's client id at the provider (default: modx-<ctx>)
+# MODX_SSO_OIDC=<issuer base>  — the door realm. ITS ENDPOINTS ARE NOT WRITTEN HERE ANY MORE:
+#                                sso.provider, sso.oidc_issuer, the four endpoints and the client id are
+#                                infra's derivation (config scripts/modx-environment.py), carried in the
+#                                installation's application.php and written by setup/apply-environment.php,
+#                                which runs after this. Writing them here too made two writers of one row
+#                                (this file wrote the door's discovery names, the environment its own).
+#                                What only this file holds is each context's SECRET.
+# MODX_SSO_OIDC_CONTEXTS       — comma-separated contexts to give a secret (default: every gated one).
 # MODX_SSO_OIDC_SECRET_<CTX>   — that context's client secret. Required per context.
 #   <CTX> is the context key upper-cased with every character outside A-Z0-9 as `_`:
 #   family-alice -> FAMILY_ALICE. A context key may carry a hyphen since the estate keys,
@@ -276,77 +209,16 @@ def set_ctx(ctx, key, value):
 #   after the rename refused on a secret nobody could have handed it (2026-09-22).
 OIDC = os.environ.get('MODX_SSO_OIDC', '').strip().rstrip('/')
 if OIDC:
-    import json as _json2
-    import urllib.request as _url2
-
-    targets = [c.strip() for c in os.environ.get('MODX_SSO_OIDC_CONTEXTS', '').split(',') if c.strip()]
-    if not targets:
-        # DERIVED WHERE THE ANSWER IS FORCED, still refused where it is a decision.
-        #
-        # The refusal below is right for production: naming which contexts change identity
-        # provider must never default to 'all of them'. But on a ground whose contexts answer in
-        # the declared BENCH ZONE there is nothing to decide — Google will not issue a callback to
-        # a private name, so an internal-zone context cannot sign anyone in through Google at all. That is
-        # not a policy, it is Google's rule, and this ground has been sitting in that state:
-        # the claude bench context 302'd to accounts.google.com with an internal-zone redirect_uri (the owner, and
-        # measured, 2026-08-14).
-        #
-        # Production is never in a bench zone, so this cannot quietly move it; an estate that
-        # declares no bench zone gets nothing and the refusal stands exactly as it did.
-        cur.execute("SELECT context_key, value FROM modx_context_setting WHERE `key`='http_host'")
-        derived = domains.contexts_on_the_bench_zone(dict(cur.fetchall()))
-        if derived:
-            targets = derived
-            print(f'  MODX_SSO_OIDC_CONTEXTS not set — derived from the bench zone '
-                  f'({domains.BENCH_ZONE}): {", ".join(targets)}')
+    # EVERY GATED CONTEXT, unless told fewer.
+    targets = [c.strip() for c in os.environ.get('MODX_SSO_OIDC_CONTEXTS', '').split(',') if c.strip()] \
+              or list(CONTEXTS)
     if not targets:
         raise SystemExit(
-            "12-sso: MODX_SSO_OIDC is set but MODX_SSO_OIDC_CONTEXTS is empty, and no context on\n"
-            "        this ground answers in a declared bench zone.\n"
-            "        Which contexts change identity provider is a decision, and there is no safe\n"
-            "        default for it — 'all of them' would move production."
+            "12-sso: MODX_SSO_OIDC is set but this run gates no context."
         )
     unknown = [c for c in targets if c not in CONTEXTS]
     if unknown:
         raise SystemExit(f"12-sso: MODX_SSO_OIDC_CONTEXTS names contexts this run does not gate: {unknown}")
-
-    cur.execute("SELECT context_key, value FROM modx_context_setting WHERE `key`='http_host' "
-                "AND context_key IN (" + ','.join(['%s'] * len(targets)) + ")", tuple(targets))
-    thosts = dict(cur.fetchall())
-    # THE SAME GUARD THE SNIPPET USES, restated because a writer that can point a public site at an
-    # internal identity provider is more dangerous than the gap it closes. SsoConfig REFUSES
-    # sso.provider=oidc on a public host at request time; this refuses to create the state at all.
-    bad = {c: thosts.get(c, '<no http_host>') for c in targets
-           if not internal(thosts.get(c, ''))}
-    if bad:
-        raise SystemExit(
-            "12-sso: REFUSING to point a PUBLIC context at the estate OIDC provider — "
-            + ', '.join(f'{c}={h}' for c, h in bad.items()) + ".\n"
-            f"        The rule: names in {_ZONE_SAID} use the estate provider, public\n"
-            "        names use Google. And the callback does not verify the id_token signature, so\n"
-            "        on a public host any address typed at that provider would become a verified\n"
-            "        identity on that site."
-        )
-    try:
-        with _url2.urlopen(f'{OIDC}/.well-known/openid-configuration', timeout=10) as fh:
-            d2 = _json2.load(fh)
-        o_auth, o_token, o_iss = d2['authorization_endpoint'], d2['token_endpoint'], d2['issuer']
-        o_ui = d2.get('userinfo_endpoint', '')
-        # The signature is verified on this path, so a provider that publishes no keys
-        # cannot be used. Refuse here rather than write a context that will refuse at sign-in.
-        o_jwks = d2.get('jwks_uri', '')
-        if not o_jwks:
-            raise SystemExit(
-                f"12-sso: {OIDC} publishes no jwks_uri in its discovery document.\n"
-                f"        The oidc path verifies the id_token signature against those keys,\n"
-                f"        so a provider without them cannot sign anyone in here."
-            )
-    except Exception as exc:                                    # noqa: BLE001 — any failure is fatal
-        raise SystemExit(
-            f"12-sso: MODX_SSO_OIDC={OIDC} did not yield a usable discovery document ({exc}).\n"
-            f"        Refusing rather than writing a guess: a context whose endpoints are wrong\n"
-            f"        falls back to nothing and reports 'sign-in is not configured'."
-        )
     for c in targets:
         ev = re.sub(r'[^A-Z0-9]', '_', c.upper())
         secret = os.environ.get(f'MODX_SSO_OIDC_SECRET_{ev}', '').strip()
@@ -357,19 +229,10 @@ if OIDC:
                 f"        to fall back to, and inventing one would make every internal context the\n"
                 f"        same client."
             )
-        cid = os.environ.get(f'MODX_SSO_OIDC_CLIENT_{ev}', f'modx-{c}').strip()
-        set_ctx(c, 'sso.provider', 'oidc')
-        set_ctx(c, 'sso.oidc_issuer', o_iss)
-        set_ctx(c, 'sso.oidc_auth_endpoint', o_auth)
-        set_ctx(c, 'sso.oidc_token_endpoint', o_token)
-        set_ctx(c, 'sso.oidc_userinfo_endpoint', o_ui)
-        set_ctx(c, 'sso.oidc_jwks_uri', o_jwks)
-        set_ctx(c, 'sso.oidc_client_id', cid)
         set_ctx(c, 'sso.oidc_client_secret', secret)
-        print(f'  {c}: sso.provider=oidc, client={cid}, issuer={o_iss} '
-              f'(host={thosts.get(c)}) — Google untouched for every other context')
+        print(f'  {c}: sso.oidc_client_secret written (the endpoints and client id are the environment\'s)')
 else:
-    print('  sso.provider untouched (MODX_SSO_OIDC unset) — every context signs in against Google')
+    print('  sso.oidc_* untouched (MODX_SSO_OIDC unset) — each context keeps the door client it has')
 
 # --- per-context resources + wiring -----------------------------------------------------------
 for ctx in CONTEXTS:
@@ -381,6 +244,7 @@ for ctx in CONTEXTS:
     login_id  = ensure_resource(ctx, LOGIN_PATH,  'GoogleSSOStart',  'Sign in')
     logout_id = ensure_resource(ctx, LOGOUT_PATH, 'GoogleSSOLogout', 'Sign out')
     denied_id = ensure_resource(ctx, DENIED_PATH, 'unauthorizedNotice', 'Access refused')
+    ensure_resource(ctx, BACKCHANNEL_PATH, 'ssoBackchannelLogout', 'Back-channel sign-out')
     if REPOINT:
         set_ctx(ctx, 'login_page', str(login_id))
         set_ctx(ctx, 'unauthorized_page', str(denied_id))

@@ -20,7 +20,7 @@ terminated at infra's edge — setup/10):
 | worldview    | intranet.example.net         |
 | platform     | claude.example.com           |
 
-The one home for this binding is `domains.prod` in the estate repository's (`modx-estate`) `estate.json`.
+The one home for this binding is infra's: `shared/cmdb/placement.yaml` (`site: true` names on `modx.detail.<env>`), derived by `config/scripts/modx-environment.py`.
 
 Separate domains ⇒ separate session cookies ⇒ **one OAuth redirect URI per gated domain**, and
 login establishes a session in the context the user is on (same as the current form login; SSO

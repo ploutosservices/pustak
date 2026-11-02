@@ -23,21 +23,20 @@
 # contain, and it PASSED while the page was being served in full — the bench's copy predated the
 # content those strings came from. A check that cannot fail is worse than no check.
 #
-# BENCH ONLY, and it signs in as a real person with no password, so it repoints sign-in at mock-oidc
-# for the duration and restores every sso.* value — including DELETING the keys that were absent
-# before it ran. It refuses on a bench whose http_host is not a bench host.
+# BENCH ONLY. It signs in as the suites' machine identity at the door's non-production realm, and
+# it restores every sso.* value it touches — including DELETING the keys that were absent before it
+# ran. It refuses on a bench whose http_host is not a bench host.
 set -uo pipefail
 
 CTX=${MODX_TEST_CTX:-platform}
 HOST=${MODX_TEST_HOST:-}   # empty: the context's live http_host, read after lib.sh
 IP=${MODX_TEST_IP:-127.0.0.1}
-# THE IDP IS THE GROUND'S FACT, NOT THIS FILE'S. This carried a dev-box literal
-# (http://127.0.0.1:9200) as its default, so on the staging ground it refused against an address
-# nothing was ever going to answer on — the same class once cleared out of the device register.
-# Order: what the ground declares, then what the ESTATE ITSELF already says (the context's own
-# sso.auth_endpoint row, which this suite writes and gates on), then a refusal that names both.
-# No literal, because a default here decides what silence means and silence meant "this box".
-IDP=${MOCK_OIDC_URL:-}
+# THE IDP IS THE GROUND'S FACT, NOT THIS FILE'S: the context's own sso.oidc_issuer row, read below.
+# This carried a dev-box literal (http://127.0.0.1:9200) as its default, so on the staging ground it
+# refused against an address nothing was ever going to answer on; then it took MOCK_OIDC_URL, which
+# named a provider that is retired. No literal and no variable, because a default here
+# decides what silence means and silence meant "this box".
+IDP=
 REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 [ -n "$HOST" ] || HOST=$(ctx_host "$CTX") || exit 2
@@ -65,19 +64,23 @@ if [ "$protected" != 1 ]; then
   exit 2
 fi
 
-if [ -z "$IDP" ]; then
-  # sso.auth_endpoint is '<idp>/authorize' — the estate's own statement of which provider this
-  # ground signs in against. Reading it beats asking the shell twice for one fact.
-  IDP=$(q "SELECT value FROM modx_system_settings WHERE \`key\`='sso.auth_endpoint' LIMIT 1;" 2>/dev/null | sed 's#/authorize$##')
-fi
+# The context's own door issuer — the ground's statement of where this context signs in (#1380;
+# the system trio that used to answer this is retired).
+IDP=$(q "SELECT value FROM modx_context_setting WHERE context_key='$CTX' AND \`key\`='sso.oidc_issuer' LIMIT 1;" 2>/dev/null)
 if [ -z "$IDP" ]; then
   echo "REFUSING TO RUN: this ground has not said where its OIDC provider is." >&2
-  echo "                 Set MOCK_OIDC_URL, or give it an sso.auth_endpoint row. No assertion" >&2
+  echo "                 Give '$CTX' an sso.oidc_issuer row (the bench's sign-in setup, on a bench). No assertion" >&2
   echo "                 has run: a statement about the ground, not about the tree." >&2
   exit 2
 fi
-if [ "$(curl -s -o /dev/null -w '%{http_code}' -m 5 "$IDP/v1/health")" != 200 ]; then
-  echo "REFUSING TO RUN: mock-oidc is not answering at $IDP — the member half cannot be measured," >&2
+# WHERE THIS CONTEXT'S SIGN-IN ACTUALLY GOES. A context on sso.provider=oidc follows
+# its own sso.oidc_* rows — the estate sign-in door. Its issuer's discovery document is the
+# reachability check (setup/12-sso.py reads the same document).
+CTX_AUTH=$(q "SELECT value FROM modx_context_setting WHERE context_key='$CTX' AND \`key\`='sso.oidc_auth_endpoint';")
+CTX_ISS=$(q "SELECT value FROM modx_context_setting WHERE context_key='$CTX' AND \`key\`='sso.oidc_issuer';")
+reach="${CTX_ISS%/}/.well-known/openid-configuration"
+if [ "$(curl -s -o /dev/null -w '%{http_code}' -m 5 "$reach")" != 200 ]; then
+  echo "REFUSING TO RUN: the provider is not answering at $reach — the member half cannot be measured," >&2
   echo "          and the anonymous half alone is the one-way proof that let the claude context's exposure happen." >&2
   exit 2
 fi
@@ -187,39 +190,48 @@ case "$anon_code" in
 esac
 check "$anon_ok" "…and is refused or sent to sign-in" \
       "HTTP $anon_code${anon_to:+ -> $anon_to} — expected 401, or a 30x to this context's sign-in"
-check "$([ "$(code sso-login)" = 200 ] && echo 1 || echo 0)" "the sign-in page itself stays anonymous"
+# ONE SIGN-IN SCREEN, THE DOOR'S: an anonymous /sso-login goes straight to THIS context's
+# authorization endpoint, with NO prompt= — a silent ask (prompt=none) would bring back MODx's own card,
+# which is the second screen he refused. Never a refusal, never a page of MODx's own.
+si_code=$(code sso-login); si_to=$(redir sso-login)
+check "$([ "$si_code" = 302 ] && [ -n "$CTX_AUTH" ] && [ "$(has "$si_to" "$CTX_AUTH")" = 1 ] && [ "$(has "$si_to" 'prompt=')" = 0 ] && echo 1 || echo 0)" \
+      "the sign-in page sends an anonymous caller straight to the door, with no prompt (one screen)" "HTTP $si_code ${si_to:0:160}"
+# THE SIGNED-OUT RETURN IS THE DOOR'S PAGE, NOT OURS (#1428; claude/shared/design/door-standard-login.md
+# §2). The door hands a sign-out back to /sso-login?reason=signed_out, and MODx sends the browser
+# straight on to the door's sign-in with chowkidar_reason=signed_out — the door's own words, "You are
+# signed out", head its page. No kc_idp_hint: a hint skips the buttons and the provider, which still
+# knows the person, signs them straight back in.
+so_to=$(redir 'sso-login?reason=signed_out')
+check "$([ "$(code 'sso-login?reason=signed_out')" = 302 ] && [ -n "$CTX_AUTH" ] && [ "$(has "$so_to" "$CTX_AUTH")" = 1 ] && [ "$(has "$so_to" 'chowkidar_reason=signed_out')" = 1 ] && echo 1 || echo 0)" \
+      "the signed-out return goes straight to the door's sign-in, carrying chowkidar_reason=signed_out" "${so_to:0:200}"
+check "$([ "$(has "$so_to" 'kc_idp_hint')" = 0 ] && [ "$(has "$so_to" 'prompt=')" = 0 ] && echo 1 || echo 0)" \
+      "  with no kc_idp_hint and no prompt, so the person presses Sign in themselves" "${so_to:0:200}"
+bogus_to=$(redir 'sso-login?reason=anything_else')
+check "$([ "$(has "$bogus_to" "${CTX_AUTH:-//}")" = 1 ] && [ "$(has "$bogus_to" 'chowkidar_reason')" = 0 ] && echo 1 || echo 0)" \
+      "a reason outside the door's fixed list is not forwarded" "${bogus_to:0:200}"
+for q in 'state=signed-out' 'sso=out' 'sso=card' 'mgr=open'; do
+  so=$(curl -s --resolve "${DOOR%%:*}:$PORT:$IP" "$SCHEME://$DOOR/sso-login?$q")
+  check "$([ "$(has "$so" 'You are signed out of')" = 0 ] && [ "$(code "sso-login?$q")" = 302 ] && echo 1 || echo 0)" \
+        "?$q draws no MODx signed-out card; it goes to the door" "${so:0:160}"
+done
 check "$([ "$(code robots)"    = 200 ] && echo 1 || echo 0)" "the support subtree stays anonymous"
 anon_body=$(curl -s --resolve "${DOOR%%:*}:$PORT:$IP" "$SCHEME://$DOOR/$page")
 
 # ── 2. a member ────────────────────────────────────────────────────────────────────────────────
 # Whose account this is is a fact about the estate, not about a test file: resolved from the groups
 # that actually cover this context.
-reader=$(q "SELECT p.email FROM modx_user_attributes p
-            JOIN modx_users u ON u.id=p.internalKey
-            JOIN modx_member_groups mg ON mg.member=u.id
-            JOIN modx_membergroup_names g ON g.id=mg.user_group
-            JOIN modx_access_context ac ON ac.principal=g.id AND ac.target='$CTX'
-            WHERE u.active=1 AND p.email LIKE '%@%' LIMIT 1;")
-[ -z "$reader" ] && { echo "REFUSING TO RUN: no active member of '$CTX' on this bench." >&2; exit 2; }
+reader=$(drill_reader)   # a machine identity, never a person
+[ -z "$reader" ] && { echo "REFUSING TO RUN: drill_reader could not seat the suites' machine identity on this ground." >&2; exit 2; }
 
-ensure_setting sso.auth_endpoint  "$IDP/authorize"
-ensure_setting sso.token_endpoint "$IDP/token"
-ensure_setting sso.issuer         "$IDP"
-landed=$(q "SELECT value FROM modx_system_settings WHERE \`key\`='sso.auth_endpoint';")
-check "$(has "$landed" "$IDP")" "sign-in is pointed at mock-oidc" "got '$landed'"
 clear_cache
 
 jar="$tmp/jar"
+# The fifth suite that signs in, which c60efcf's "four" missed: it presents this box's certificate
+# like the other four, so the door's certificate sign-in sees the same caller on every suite.
 C=(curl -sS --resolve "${DOOR%%:*}:$PORT:$IP" -b "$jar" -c "$jar" -m 15)
 loc=$("${C[@]}" -o /dev/null -w '%{redirect_url}' "$SCHEME://$DOOR/sso-login?sso=go")
-check "$(has "$loc" "$IDP")" "sign-in leaves for the provider" "got '$loc'"
-form=$("${C[@]}" "$loc")
-qval=$(printf '%s' "$form" | grep -o 'name="q" value="[^"]*"' | head -1 | sed 's/.*value="//; s/"$//')
-qval=${qval//&amp;/&}
-check "$([ -n "$qval" ] && echo 1 || echo 0)" "the provider offers its form"
-[ -z "$qval" ] && { summary; exit 1; }
-cb=$("${C[@]}" -o /dev/null -w '%{redirect_url}' -X POST \
-     --data-urlencode "q=$qval" --data-urlencode "email=$reader" "${loc%%\?*}")
+check "$(has "$loc" "${CTX_AUTH:-$IDP}")" "sign-in leaves for the provider" "got '$loc'"
+cb=$(idp_sign_in "$loc" "$reader")   # the door's form, by password (lib.sh)
 check "$(has "$cb" 'code=')" "signing in yields an authorization code" "got '$cb'"
 check "$([ "$("${C[@]}" -o /dev/null -w '%{http_code}' "$cb")" = 302 ] && echo 1 || echo 0)" \
       "the callback completes the exchange"
@@ -240,5 +252,19 @@ check "$(hasnt "$anon_body" "$marker")" "the anonymous caller received NONE of t
       "the member's text appeared in the anonymous response"
 check "$([ "${#anon_body}" -lt $(( ${#member_body} / 2 )) ] && echo 1 || echo 0)" \
       "the anonymous body is a fraction of the member's (${#anon_body} vs ${#member_body} bytes)"
+
+# ── 4. the member signs out, at the door (#1428; door-standard-login.md §2) ────────────────────
+# One hop, not followed: the sign-out ends MODx's session and hands the browser to the door's
+# end_session_endpoint with the session's id_token and a way back to this context's sign-in entry.
+out_to=$("${C[@]}" -o /dev/null -w '%{redirect_url}' "$SCHEME://$DOOR/sso-logout")
+shown=$(printf '%s' "$out_to" | sed -E 's/(id_token_hint=)[^&]*/\1<token>/')   # a failure never prints a token
+check "$([ "$(has "$out_to" 'protocol/openid-connect/logout')" = 1 ] && [ "$(has "$out_to" 'id_token_hint=')" = 1 ] && echo 1 || echo 0)" \
+      "sign-out goes to the door's end_session_endpoint with id_token_hint" "${shown:0:240}"
+check "$(has "$out_to" 'post_logout_redirect_uri=')" \
+      "  and names where the door returns the browser" "${shown:0:240}"
+check "$(has "$out_to" 'sso-login%3Freason%3Dsigned_out')" \
+      "  which is this context's sign-in entry with reason=signed_out" "${shown:0:300}"
+after=$("${C[@]}" -o /dev/null -w '%{http_code}' "$SCHEME://$DOOR/$page")
+check "$([ "$after" != 200 ] && echo 1 || echo 0)" "after it, the page is no longer served to that browser" "HTTP $after"
 
 summary

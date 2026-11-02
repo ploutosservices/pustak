@@ -50,9 +50,9 @@ function reader(array $settings, array &$asked): callable {
 
 /** Entry shapes copied from the real generated artifact (modx@production.json). */
 $ARTIFACT = ['atom' => 'modx', 'requires' => [
-    ['canonical' => 'vault:infra/google_sso_client_id', 'key' => 'sso.google_client_id',
+    ['canonical' => 'vault:infra/modx_oidc_client_id', 'key' => 'sso.oidc_client_id',
      'kind' => 'secret', 'required' => true, 'validate' => 'presence'],
-    ['canonical' => 'vault:infra/google_sso_client_secret', 'key' => 'sso.google_client_secret',
+    ['canonical' => 'vault:infra/modx_oidc_client_secret', 'key' => 'sso.oidc_client_secret',
      'kind' => 'secret', 'required' => true, 'validate' => 'presence'],
     ['key' => 'endpoint:google/oidc', 'keys' => ['sso.issuer', 'sso.auth_endpoint', 'sso.token_endpoint'],
      'kind' => 'endpoint', 'mode' => 'all_of', 'required' => true, 'validate' => 'presence'],
@@ -64,7 +64,7 @@ $ARTIFACT = ['atom' => 'modx', 'requires' => [
 
 echo "control — the probe can tell a satisfied requirement from an unsatisfied one\n";
 $asked = [];
-$all = ['sso.google_client_id' => 'v', 'sso.google_client_secret' => 'v', 'sso.issuer' => 'v',
+$all = ['sso.oidc_client_id' => 'v', 'sso.oidc_client_secret' => 'v', 'sso.issuer' => 'v',
         'sso.auth_endpoint' => 'v', 'sso.token_endpoint' => 'v', 'storage.modx_token' => 'v'];
 $full  = Actuator::verdicts($ARTIFACT, reader($all, $asked));
 $empty = Actuator::verdicts($ARTIFACT, reader([], $asked));

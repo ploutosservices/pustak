@@ -30,7 +30,7 @@ has to.
 | `bash tests/clear-cache-reaches-contexts.sh` | after `clear-cache.php`, a changed setting is what a real page renders | **bench only** |
 | `bash tests/head-favicon.sh` | every context declares the application's mark (the veena), and every URL it names exists on cdn | **bench only**, read-only |
 | `bash tests/protect-on-save.sh` | a page created or undeleted in the manager refuses an anonymous request — **401, or a redirect to its context's sign-in** — before any job runs, the `support` subtree still answers 200, and the verifier goes red on each way the enforcement can silently stop | **bench only** |
-| `bash tests/sso-verified-email.sh` | a real sign-in leaves `sso.verified_email` in the session — the one fact `&auth` asserts | **bench only**, needs the vhost + mock-oidc |
+| `bash tests/sso-verified-email.sh` | a real sign-in leaves `sso.verified_email` in the session — the one fact `&auth` asserts | **bench only**, needs the vhost + the door's dev realm |
 | `bash tests/auth-end-to-end.sh` | a real page, a real signed-in reader, a Bearer arriving at a real listener, and an anonymous reader asking nothing | **bench only**, same |
 | `bash tests/suites-accept-their-ground.sh` | these suites can address a schema and a docroot that are **not on the machine running them** — `MODX_DB_HOST` reaches `q()`, no suite hardcodes the docroot, and `MODX_INSTALL_DIR` is refused rather than ignored | **anywhere**, no database |
 | `python3 tests/element-body-db-form.py` | the three writers of an element body — `04-access-control.py`, `apply-modx-elements.sh` and the verifier that compares them — store and expect the **same bytes**, so a correct deploy cannot report drift | **anywhere**, no database |
@@ -48,8 +48,8 @@ it was believed only after the session stamp was removed and it went red in four
 
 **They refuse rather than degrade.** No kuber checkout means the token would be checked by a copy of
 their verifier instead of the real one — the suite exits 2 rather than quietly dropping the check
-(`ALLOW_NO_KUBER=1` overrides, knowingly). An `sso.auth_endpoint` that is not mock-oidc means signing
-in as somebody for real; exit 2. A `kuber.jwt_private_key` already present means a real key is here
+(`ALLOW_NO_KUBER=1` overrides, knowingly). An `sso.oidc_auth_endpoint` that is not a non-production
+realm of the door means signing in as somebody for real; exit 2. A `kuber.jwt_private_key` already present means a real key is here
 and would be overwritten with a throwaway; exit 2. A bench that already reports protection drift
 cannot distinguish an induced fault from the one already there; exit 2. `run-all.sh` counts a refusal
 separately from a pass, because "could not check" is not "checked, and it is fine".

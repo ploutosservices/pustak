@@ -17,7 +17,7 @@
 #
 # Both are the same shape: a surface only a person could see, so a person was the instrument.
 #
-# WHAT IT ASSERTS, on the bench, signed in for real through mock-oidc:
+# WHAT IT ASSERTS, on the bench, signed in for real at the door:
 #
 #   the shared stylesheet is LINKED from the ground's own estate_cdn_url  (never a literal)
 #   the bar carries data-env = the ground's own estate_env
@@ -31,8 +31,8 @@
 # The colour is drilled IN BOTH DIRECTIONS against this ground's own setting, and the setting is
 # put back exactly as it was found — including "absent", which is not the same as empty.
 #
-# BENCH ONLY. It signs in as a real person without their password, which is only possible because
-# the bench's provider is mock-oidc; require_mock_idp refuses anywhere else.
+# BENCH ONLY. It signs in as the suites' machine identity at the door's non-production realm;
+# require_nonprod_door refuses anywhere else.
 set -uo pipefail
 
 HOST=${MODX_TEST_HOST:-}   # empty: the context's live http_host, read after lib.sh
@@ -49,13 +49,12 @@ DOOR=$(host_door "$HOST") || exit 2
 
 require_repo
 require_bench
-require_mock_idp
+require_nonprod_door
 
 echo "the estate title bar, signed in on the bench"
 
-reader=$(q "SELECT p.email FROM modx_user_attributes p JOIN modx_users u ON u.id=p.internalKey
-            WHERE u.active=1 AND p.email LIKE '%@%' ORDER BY u.id LIMIT 1;")
-[ -z "$reader" ] && { echo "REFUSING TO RUN: no active user with an email on this bench." >&2; exit 2; }
+reader=$(drill_reader)   # a machine identity, never a person
+[ -z "$reader" ] && { echo "REFUSING TO RUN: drill_reader could not seat the suites' machine identity on this ground." >&2; exit 2; }
 
 # THE GROUND'S OWN VALUES, read rather than assumed — a suite that hardcoded 'production' or an
 # indigo would pass on the one ground where it must fail.
@@ -114,13 +113,9 @@ PAGE="$SCHEME://$DOOR/$ALIAS"
 jar="$tmp/cookies"
 C=(curl -sS --resolve "${DOOR%%:*}:$PORT:$IP" -b "$jar" -c "$jar" -m 10)
 
-# --- sign in for real through the bench's mock provider ----------------------------------------
+# --- sign in for real at the door --------------------------------------------------------------
 loc=$("${C[@]}" -o /dev/null -w '%{redirect_url}' "$SCHEME://$DOOR/sso-login?sso=go")
-form=$("${C[@]}" "$loc")
-qval=$(printf '%s' "$form" | grep -o 'name="q" value="[^"]*"' | head -1 | sed 's/.*value="//; s/"$//')
-qval=${qval//&amp;/&}
-cb=$("${C[@]}" -o /dev/null -w '%{redirect_url}' -X POST \
-     --data-urlencode "q=$qval" --data-urlencode "email=$reader" "${loc%%\?*}")
+cb=$(idp_sign_in "$loc" "$reader")   # the door's form, by password (lib.sh)
 "${C[@]}" -o /dev/null "$cb"
 sid=$(awk '/PHPSESSID/ {print $7}' "$jar" | tail -1)
 signed=$(q "SELECT data FROM modx_session WHERE id='$sid';" | grep -c 'user.token')
@@ -143,6 +138,35 @@ APP_NAME=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["iden
 check "$(has "$out" "estate-bar-app\">$APP_NAME")" \
       "the app name slot says the manifest's display name ($APP_NAME)" \
       "$(printf '%s' "$out" | grep -o 'estate-bar-app[^<]*<[^<]*' | head -1)"
+# "Where am I signed in" links the door's account page for this context's realm.
+iss=$(q "SELECT value FROM modx_context_setting WHERE \`key\`='sso.oidc_issuer' AND context_key=(SELECT context_key FROM modx_context_setting WHERE \`key\`='http_host' AND value='${DOOR%%:*}' LIMIT 1) LIMIT 1;")
+check "$([ -n "$iss" ] && has "$out" "href=\"${iss%/}/account\"" || echo 0)" \
+      "the bar links 'Where am I signed in' to the door's account page" "issuer '$iss'"
+# Rule 8 of estate-title-bar.md: every icon in the bar is the estate icon for its meaning,
+# from this ground's CDN, and its hover is data-estate-tip — no Bootstrap glyph, no title on a control.
+# The greeting's title is the address tooltip on a name, not an icon, so only <a> and <button> count.
+bar=$(printf '%s' "$out" | sed -n '/<header class="estate-bar"/,/<\/header>/p')
+check "$(hasnt "$bar" 'class="bi ')" \
+      "rule 8: the bar draws no Bootstrap glyph" \
+      "$(printf '%s' "$bar" | grep -o 'class="bi [^"]*"' | sort -u | tr '\n' ' ')"
+for m in menu print search sessions sign-out; do
+  check "$(has "$bar" "$cdn/estate/icons/$m.svg?v=")" \
+        "rule 8: the bar draws the estate '$m' icon from the ground's CDN" "looked for $cdn/estate/icons/$m.svg?v="
+done
+# A picture the CDN does not serve draws a BLANK button behind every green check above: on 2026-10-29
+# sessions.svg was a 404 at the CDN and "where am I signed in" was invisible. Every icon the bar asks for
+# must answer 200 where the bar asks for it.
+for u in $(printf '%s' "$bar" | grep -o "$cdn/estate/icons/[a-z-]*\.svg?v=[0-9a-f]*" | sort -u); do
+  code=$(curl -s -o /dev/null -m 10 -w '%{http_code}' "$u")
+  check "$([ "$code" = 200 ] && echo 1 || echo 0)" "rule 8: the CDN serves ${u##*/icons/}" "got $code for $u"
+done
+titled=$(printf '%s' "$bar" | grep -o '<\(a\|button\)[^>]*>' | grep ' title=')
+check "$([ -z "$titled" ] && echo 1 || echo 0)" \
+      "rule 8: no control in the bar carries its hover as title" "$(printf '%s' "$titled" | head -2)"
+check "$(has "$bar" 'data-estate-tip="Where am I signed in"')" \
+      "rule 8: where am I signed in carries its hover as data-estate-tip" ""
+check "$(has "$("${C[@]/$jar/$tmp/anon}" "$PAGE")" "$cdn/estate/icons/sign-in.svg?v=")" \
+      "rule 8: signed out, the bar draws the estate 'sign-in' icon" "a fresh cookie jar, no session"
 check "$(hasre "$out" "estate-bar-(tenant|context)[^>]*>[^<]*[A-Za-z]")" \
       "the tenant slot names something rather than rendering empty" \
       "$(printf '%s' "$out" | grep -o 'estate-bar-\(tenant\|context\)[^<]*<[^<]*' | head -1)"

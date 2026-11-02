@@ -10,6 +10,13 @@
           "GET"
         ],
         "door": "identity:client certificate — the web server sets X-Client-Identity from a verified chain"
+      },
+      {
+        "path": "/sso-backchannel-logout",
+        "methods": [
+          "POST"
+        ],
+        "door": "open:the identity provider's back-channel sign-out call (OIDC Back-Channel Logout 1.0) — the provider presents no client certificate and no session; the element admits only a logout_token signed under the provider's published keys for this context's client"
       }
     ],
     "layer": [

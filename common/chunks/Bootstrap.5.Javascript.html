@@ -4,20 +4,6 @@
 <script src="[[++estate_cdn_url]]/bootstrap/5.3.8/js/bootstrap.bundle.min.js"></script>
 
 <script>
-// THE ADDRESS AND TIME ON A PRINTOUT — the line kuber's print.js writes. Stamped on load
-// and again on beforeprint, so the time is the moment of printing, not the moment the page
-// loaded. The element is #modxPrintAddress in the templates, hidden on screen by Bootstrap.5.CSS.
-(function () {
-  var stamp = function () {
-    var el = document.getElementById('modxPrintAddress');
-    if (el) el.textContent = window.location.href + ' · printed ' + new Date().toLocaleString();
-  };
-  stamp();
-  window.addEventListener('beforeprint', stamp);
-})();
-</script>
-
-<script>
 // The left navigation's toggle (the owner, 2026-09-18). Two states for two screens: on a wide screen
 // html.leftnav-hidden folds it away and is REMEMBERED (localStorage modx.leftnav); on a phone
 // html.leftnav-open slides it over the page and is forgotten on the next load. The button lives in
@@ -227,10 +213,17 @@ document.addEventListener('submit', function (e) {
 // the cell takes focus (tabindex) so Enter opens it. The hover is estate-link's.
 (function () {
   function cellOf(e) { return e.target.closest && e.target.closest('td[data-content-url]'); }
+  // An address on another site opens in the named "external" tab — the same rule as every link out
+  // (tableRenderer's target="external"); the owner, 2026-10-13, on the Feeds page's record cells:
+  // "the stuff is supposed to open in new 'external' tab". A page of this site still opens in place.
   function open(cell, newTab) {
     var url = cell.getAttribute('data-content-url');
     if (!url) return;
-    if (newTab) window.open(url, '_blank'); else window.location.href = url;
+    var away = false;
+    try { away = new URL(url, window.location.href).host !== window.location.host; } catch (e) {}
+    if (newTab) window.open(url, '_blank');
+    else if (away) window.open(url, 'external');
+    else window.location.href = url;
   }
   document.addEventListener('click', function (e) {
     var cell = cellOf(e);

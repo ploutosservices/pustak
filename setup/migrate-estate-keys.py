@@ -13,12 +13,9 @@ WHAT IT DOES, in order, and it stops at the first failure:
   1. `21-rename-context` for each pair. That verb owns the rename — the rows in every table that
      holds a context key, the derived `<ctx>ProtectedFiles` name, the settings photograph that must
      match exactly under the new key, and the refusals. One transaction per rename.
-  2. The DOMAIN REBIND, but only where the ground derives its hostnames from the context key.
-     Measured 2026-09-22: a bench ground's `http_host` is `<ctx>.<bench_zone>`, so it moves with the
-     key and `bench-domains` must re-derive it. A PRODUCTION ground's does NOT — there `http_host`
-     is the tenant's public address, a fact about the tenant and not about MODx's key, so nothing
-     needs rebinding. The branch is taken from what the ground actually holds, not from a name or
-     a flag.
+  2. The NAMES. A context's http_host and site_url are infra's: the ground's
+     application.php holds them under the new key once infra renders it, and
+     setup/apply-environment.php writes them. This step runs it when MODX_ROOT names the docroot.
 
   3. NOT the access converge. `setup/04` must run after this, and it already does: every deploy
      verb that carries this software runs it, snapshot-guarded. Running it here as well would
@@ -33,8 +30,6 @@ import os
 import subprocess
 import sys
 
-import pymysql
-from domains import db_config, DOMAINS
 from estate import CONTEXT_RENAMES
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -63,31 +58,19 @@ for old, new in PAIRS:
         sys.exit(f'\nmigrate-estate-keys: {old} -> {new} exited {rc}. STOPPING — nothing after this '
                  f'point has run, and that rename left the ground as it was.')
 
-# ── does this ground derive its hostnames from the context key? ────────────────────────────────
-zone = (DOMAINS.get('bench_zone') or '').strip()
-conn = pymysql.connect(**db_config())
-cur = conn.cursor()
-cur.execute("SELECT context_key, value FROM modx_context_setting WHERE `key`='http_host'")
-hosts = dict(cur.fetchall())
-cur.close()
-conn.close()
-
-derived = sorted(c for c, h in hosts.items() if zone and (h or '').endswith('.' + zone))
+# ── the names, from this ground's application.php (infra's render) ─────────────────────────────
+root = os.environ.get('MODX_ROOT')
 print()
-if not derived:
-    print(f'  http_host on this ground is not derived from the context key '
-          f'({", ".join(f"{c}={h}" for c, h in sorted(hosts.items())) or "no rows"}) — '
-          f'no domain rebind needed.')
+if not root:
+    print('  MODX_ROOT unset — the names are not written here; run setup/apply-environment.php on the docroot.')
+elif DRY:
+    print('  (dry run: apply-environment not run)')
 else:
-    print(f'  http_host IS derived here ({", ".join(derived)} end in .{zone}) — rebinding.')
-    if DRY:
-        print('  (dry run: bench-domains not run)')
-    else:
-        r = subprocess.run([sys.executable, os.path.join(HERE, 'bench-domains.py')], cwd=HERE)
-        if r.returncode != 0:
-            sys.exit(f'\nmigrate-estate-keys: bench-domains exited {r.returncode}. The renames are '
-                     f'COMMITTED and the hostnames are not rebound — this ground answers to the old '
-                     f'names until that is fixed.')
+    r = subprocess.run(['php', os.path.join(HERE, 'apply-environment.php')], cwd=HERE)
+    if r.returncode != 0:
+        sys.exit(f'\nmigrate-estate-keys: apply-environment exited {r.returncode}. The renames are '
+                 f'COMMITTED and the names are not written — this ground answers to the old '
+                 f'names until that is fixed.')
 
 print('\nmigrate-estate-keys: done. setup/04 (the access converge) must run after this, and the '
       'deploy verb that carried this software runs it.')

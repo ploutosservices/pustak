@@ -57,6 +57,15 @@
 .estate-sections{margin-top:-14px;position:relative;margin-left:var(--estate-bar-logo-w,64px);padding:0 var(--estate-bar-pad,16px);
   background:var(--estate-env-color,var(--estate-env-undeclared))}
 .estate-sections .nav-link,.estate-sections .navbar-toggler{color:var(--estate-bar-fg,#cbd5e1)}
+/* THE BAR'S ICONS ARE THE ESTATE'S (estate-title-bar.md rule 8): each is the CDN's
+   estate/icons/<meaning>.svg, named on the element as --estate-icon. A Heroicons file drawn as an
+   image is black, so it is a mask over currentColor (estate-icons.md §The files) and takes the bar's
+   own colour and hover; 20px is the size titlebar.css gives an icon in the bar. */
+.estate-bar-icon{display:inline-block;width:20px;height:20px;background-color:currentColor;-webkit-mask:var(--estate-icon) center/contain no-repeat;mask:var(--estate-icon) center/contain no-repeat}
+/* The greeting card's face (estate-title-bar.md §2.3): the door's picture, else the first letter on a disc. */
+.estate-bar-who .estate-hover-card{white-space:nowrap}
+.estate-bar-who .estate-hover-card b{display:block}
+.estate-hover-card .modx-avatar{display:inline-flex;align-items:center;justify-content:center;flex:none;width:40px;height:40px;border-radius:50%;background:#e2e8f0;color:#334155;font-weight:600;object-fit:cover;margin-bottom:6px}
 .estate-sections .nav-link:hover,.estate-sections .nav-link:focus,.estate-sections .nav-link.show{color:var(--estate-bar-fg-strong,#f1f5f9)}
 @media (min-width:768px){
   /* As tall as the space between the bars and the footer, not the footer included: 41px taller and
@@ -80,16 +89,14 @@
   html.leftnav-open .modx-leftnav-col{transform:none}
   html.leftnav-open body::after{content:"";position:fixed;top:calc(var(--estate-bar-h, 56px) + 36px);right:0;bottom:0;left:0;background:rgba(0,0,0,.35);z-index:1029}
 }
-/* ON PAPER: the content and nothing else — the estate bar, the sections row, the left
-   column and the footer stay on screen, main takes the freed width, and the page's address stands
-   on the first line (kuber's rule from Data, the owner 2026-09-21: a printout must say where it came
-   from, and the browser prints the URL only when its own headers-and-footers option is on).
-   The shell is a fixed-height flex column whose second child scrolls (page.full, page.folder);
-   on paper both must be free to grow or the printout is one page cut at the viewport's height. */
-.modx-print-only{display:none}
+/* ON PAPER: the content and nothing else. What leaves the paper is estate-print's (claude/shared/design/
+   estate-print.md, imported by titlebar.css): the estate bar, and the sections row, the left column and the
+   footer, each marked data-estate-print="hide"; each sheet's margins carry the tenant and title, the address,
+   printed when and by whom, and Page N of M. What stays here is Library's own layout: main takes the freed width,
+   and the shell — a fixed-height flex column whose second child scrolls (page.full, page.folder) — is
+   free to grow on paper, or the printout is one page cut at the viewport's height. */
 @media print{
-  .modx-print-only{display:block!important;font-size:.75rem;word-break:break-all;margin-bottom:.5rem}
-  header.estate-bar,nav.estate-sections,.modx-leftnav-col,.bd-sidebar,footer.footer{display:none!important}
+  .bd-sidebar{display:none!important}
   body>div[style]{display:block!important;height:auto!important}
   body>div[style]>div[style]{display:block!important;overflow:visible!important}
   /* .bd-sidebar is the folder page's own menu column (folderContent), the page.folder twin of

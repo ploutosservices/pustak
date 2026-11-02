@@ -23,7 +23,7 @@
 #
 # On (3): infra's ask named the variable MODX_INSTALL_DIR. It is MODX_ROOT — already declared in
 # service.json as `path:modx/docroot`, already read by jump-nav.php, 11-add-context.py and
-# bench-domains.py. Two names for one fact is what rule 18 exists to stop, and the
+# apply-environment.php. Two names for one fact is what rule 18 exists to stop, and the
 # cost here is concrete rather than theoretical: a runner that sets one while the suites read the
 # other gets a silent default and reports green against a machine nobody meant. So the second name
 # is refused out loud, which turns a green-against-the-wrong-box into a one-line fix.
@@ -126,8 +126,8 @@ rm -f "$probe"
 # ── 2b. the scheme and port are DECLARED, not hardcoded ────────────────────────────────────────
 # Six suites requested `http://$HOST` on `:80`. MODx staging is https — `:80` 301s to `:443` — so
 # curl without -L hands back the redirect page and every body assertion reads it: six suites red,
-# none of them about the code. The scheme's one home is the estate's `bench_scheme`, which reaches
-# each context's `site_url`; the suites read it from there through lib.sh's origin_of().
+# none of them about the code. The scheme's one home is each context's `site_url`, which infra
+# derives; the suites read it from there through lib.sh's origin_of().
 lit=$(scan_scheme_literals)
 if [ -z "$lit" ]; then
   ok "no suite hardcodes http:// or :80 for its own host"

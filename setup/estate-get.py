@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """estate-get.py — print one value from the estate file, for the shell scripts in setup/.
 
-    python3 setup/estate-get.py domains.bench_zone          # MODX_ESTATE names the estate file
+    python3 setup/estate-get.py domains.contexts            # MODX_ESTATE names the estate file
 
-The estate's facts (its bench zone, its contexts) live in one file; a shell script that needs one
+The estate's facts (its contexts) live in one file; a shell script that needs one
 reads it here rather than typing it, so the software carries no estate. A missing file or key
 REFUSES (exit 2) and says which — a guessed value would point a guard at the wrong machine.
 A list prints one item per line.

@@ -69,8 +69,8 @@ SEED = [
     ("worldview", "sso.provider", "oidc"), ("worldview", "http_host", "worldview.modx.internal.test"),
     ("claude", "sso.provider", "oidc"), ("claude", "site_url", "https://claude.modx.internal.test/"),
 ]
-SEED_SYS = [("sso.issuer", "https://mock-oidc.app.internal.test"),
-            ("sso.auth_endpoint", "https://mock-oidc.app.internal.test/authorize")]
+SEED_SYS = [("sso.issuer", "https://door.app.internal.test/realms/dev"),
+            ("sso.auth_endpoint", "https://door.app.internal.test/realms/dev/protocol/openid-connect/auth")]
 
 
 class Sqlite:
@@ -225,7 +225,7 @@ def count_sso(ground):
 # somebody wrapped a write in a helper, and a check that decides its own scope can always decide
 # it is finished. Adding a pass here is a deliberate act; so is removing one, and removing one
 # without removing the pass is the thing this is watching for.
-GUARDED_PASSES = ["11-add-context.py", "12-sso.py", "bench-domains.py", "10-production-domains.py"]
+GUARDED_PASSES = ["11-add-context.py", "12-sso.py"]
 
 SETUP = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "setup")
 

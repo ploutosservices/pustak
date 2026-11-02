@@ -167,7 +167,7 @@ local_php() { php "$@"; }
 # --- the install directory, and the one name it has ---------------------------------------------
 # infra's ask named this MODX_INSTALL_DIR. It is MODX_ROOT: that variable already exists, is already
 # declared in service.json as `path:modx/docroot`, and is already what jump-nav.php, 11-add-context
-# and bench-domains read. A second name for one fact is the thing rule 18 exists to
+# and apply-environment read. A second name for one fact is the thing rule 18 exists to
 # stop, and the cost of two names is not theoretical — it is a verb that sets one while the suites
 # read the other, which is a green run against a machine nobody meant.
 #
@@ -188,6 +188,89 @@ fi
 # clear-cache.php ('Could not open input file', discarded to /dev/null).
 export MODX_ROOT=${MODX_ROOT:-/srv/local/modx}
 
+# --- no client certificate at the door ----------------------------------------------------------
+# The suites sign in by the test user's password (idp_sign_in) and present no certificate. They once
+# presented this box's estate certificate on every hop (for the mock's act-as); the
+# non-production door now answers an estate-CA certificate with nginx's 400 "The SSL certificate
+# error" before it serves its form (measured 2026-10-28: discovery 200 without, 400 with
+# skunkworks@dev), and MODx never asked for one.
+
+# --- signing in at the estate sign-in door (the mock is retired) -------------------------------
+# idp_sign_in <authorize-url> <address> -> prints the callback URL carrying the code, or nothing.
+# Uses the suite's own curl array C (its cookie jar, --resolve and certificate), so the door's
+# session cookie rides the same jar as MODx's. The door (design/estate-sign-in.md §2) serves
+# Keycloak's kc-form-login and takes the realm user's password: on a box with a vault, from
+# skunkworks' collection under the name infra declared; on a ground with no vault, from
+# the pair infra renders (below). An agent signs in AS the test user by its password — no act-as
+# outside production. The only form accepted is the door's; any other page is a refusal that names it.
+idp_sign_in() {
+  local loc=$1 who=$2 form action realm pw
+  form=$("${C[@]}" "$loc")
+  action=$(printf '%s' "$form" | grep -o 'id="kc-form-login"[^>]*action="[^"]*"' | head -1 | sed 's/.*action="//; s/"$//')
+  [ -n "$action" ] || { echo "idp_sign_in: the provider did not serve the door's sign-in form: $(printf '%s' "$form" | sed 's/<[^>]*>/ /g' | tr -s ' \n' ' ' | head -c 200)" >&2; return 1; }
+  realm=$(printf '%s' "$loc" | sed -n 's#.*/realms/\([^/]*\)/.*#\1#p')
+  # A GROUND WITH NO VAULT (staging): infra renders the realm users' addresses and passwords
+  # into /etc/modx-staging-tests.env — MODX_DOOR_USER with MODX_DOOR_PASSWORD (the drill reader) and  # pragma: allowlist secret
+  # MODX_DOOR_OUTSIDER with MODX_DOOR_OUTSIDER_PASSWORD (an address MODx does not know). A suite  # pragma: allowlist secret
+  # that signs in as anyone else FAILS naming the variables, rather than presenting the wrong
+  # person's password.
+  if [ -n "${MODX_DOOR_PASSWORD:-}" ] || [ -n "${MODX_DOOR_OUTSIDER_PASSWORD:-}" ]; then  # pragma: allowlist secret
+    if [ "$who" = "${MODX_DOOR_USER:-}" ] && [ -n "${MODX_DOOR_PASSWORD:-}" ]; then  # pragma: allowlist secret
+      pw=$MODX_DOOR_PASSWORD  # pragma: allowlist secret
+    elif [ "$who" = "${MODX_DOOR_OUTSIDER:-}" ] && [ -n "${MODX_DOOR_OUTSIDER_PASSWORD:-}" ]; then  # pragma: allowlist secret
+      pw=$MODX_DOOR_OUTSIDER_PASSWORD  # pragma: allowlist secret
+    else
+      echo "idp_sign_in: this ground renders passwords for MODX_DOOR_USER='${MODX_DOOR_USER:-}' and MODX_DOOR_OUTSIDER='${MODX_DOOR_OUTSIDER:-}', and this suite signs in as $who" >&2; return 1  # names the variables, carries no value; pragma: allowlist secret
+    fi
+  else
+    pw=$(vault get "Keycloak (non-production sign-in door) — $realm user $who") && [ -n "$pw" ] \
+      || { echo "idp_sign_in: no password in the vault for $who in realm '$realm', and no rendered MODX_DOOR_*PASSWORD names it" >&2; return 1; }  # pragma: allowlist secret
+  fi
+  # The password goes on stdin, never in argv, where any process listing on the box would show it.
+  printf '%s' "$pw" | "${C[@]}" -o /dev/null -w '%{redirect_url}' -X POST \
+    --data-urlencode "username=$who" --data-urlencode "password@-" --data-urlencode "credentialId=" \
+    "${action//&amp;/&}"
+}
+
+# door_can_sign_in <address> -> 0 when this ground can present that address's password (a vault, or
+# a rendered pair naming it); a suite that needs a second user REFUSES on 2 rather than failing as
+# if MODx were wrong, which is what staging did nightly for the outsider.
+door_can_sign_in() {
+  if [ -n "${MODX_DOOR_PASSWORD:-}" ] || [ -n "${MODX_DOOR_OUTSIDER_PASSWORD:-}" ]; then  # pragma: allowlist secret
+    { [ "$1" = "${MODX_DOOR_USER:-}" ] && [ -n "${MODX_DOOR_PASSWORD:-}" ]; } \
+      || { [ "$1" = "${MODX_DOOR_OUTSIDER:-}" ] && [ -n "${MODX_DOOR_OUTSIDER_PASSWORD:-}" ]; }  # pragma: allowlist secret (both lines)
+    return
+  fi
+  command -v vault >/dev/null
+}
+
+# --- the suites' own reader: a machine identity, never a person ---------------------------------
+# The suites signed in as the first active user with an email — on every bench and on staging that
+# is the owner's own account, restored from production, by a password the door is about to refuse
+# to people (D6). drill_address is a door test user that is no person; its MODx account is not in
+# production, so every restore drops it and drill_reader puts it back: active, in allContextMember
+# (every context's member group), no password a manager login could match. Prints the address.
+# MODX_DRILL_READER names another machine identity the door already knows, for a ground where this
+# one is not yet a door user. It must still be a machine identity, never a person.
+drill_address=${MODX_DRILL_READER:-modx-drill@example.test}
+drill_reader() {
+  local id
+  id=$(q "SELECT internalKey FROM modx_user_attributes WHERE email='$drill_address' LIMIT 1;")
+  if [ -z "$id" ]; then
+    id=$(q "INSERT INTO modx_users (username, password, salt, active, sudo, createdon)
+              VALUES ('$drill_address', '', '', 1, 0, UNIX_TIMESTAMP());
+            INSERT INTO modx_user_attributes (internalKey, fullname, email, address, comment)
+              VALUES (LAST_INSERT_ID(), 'MODx Drill', '$drill_address', '', '');
+            SELECT internalKey FROM modx_user_attributes WHERE email='$drill_address' LIMIT 1;")
+  fi
+  [ -n "$id" ] || { echo "drill_reader: could not create $drill_address on this ground" >&2; return 1; }
+  q "UPDATE modx_users SET active=1 WHERE id=$id;
+     INSERT INTO modx_member_groups (user_group, member, role, \`rank\`)
+       SELECT g.id, $id, 1, 0 FROM modx_membergroup_names g WHERE g.name='allContextMember'
+       AND NOT EXISTS (SELECT 1 FROM modx_member_groups m WHERE m.user_group=g.id AND m.member=$id);"
+  printf '%s' "$drill_address"
+}
+
 # --- the scheme and port, which are DECLARED and were hardcoded ---------------------------------
 # Every request in these suites was `--resolve "$HOST:80:$IP"` against `http://$HOST/…`. That was
 # true while a bench meant plain http on somebody's workstation. MODx staging sits behind four
@@ -196,10 +279,9 @@ export MODX_ROOT=${MODX_ROOT:-/srv/local/modx}
 # would report failures that are about the scheme and not about the code. That is precisely what
 # was warned of: addressing a bench that no longer exists rather than reporting a defect.
 #
-# The scheme is not a constant to swap, it is DECLARED: `bench_scheme` in the estate file, which
-# `domains.py` reads and `bench-domains.py` writes into each context's `site_url`. So the suites
-# read it from the same one home rather than carrying a second copy — the same argument as ask 3's
-# MODX_ROOT. A dev-box bench declaring http is unchanged in every byte.
+# The scheme is not a constant to swap, it is DECLARED: each context's `site_url`, which infra's
+# modx-environment.py derives and setup/apply-environment.php writes. So the suites read it
+# from the database rather than carrying a second copy — the same argument as ask 3's MODX_ROOT.
 
 # origin_of <site_url> -> "<scheme> <port>". PURE: no database, no network, unit-drilled in
 # tests/suites-accept-their-ground.sh. Returns 1 on anything it cannot read, so a caller can never
@@ -222,7 +304,7 @@ origin_of() {
 
 # ctx_origin <context> / host_origin <http_host> — the same fact, reached the two ways the suites
 # know their target. http_host is the context-resolution key; site_url carries the scheme. Both are
-# written by bench-domains.py from the estate, so neither is a second home for anything.
+# written by apply-environment.php from infra's derivation, so neither is a second home for anything.
 ctx_origin() {
   local url; url=$(q "SELECT value FROM modx_context_setting WHERE context_key='$1' AND \`key\`='site_url';")
   origin_of "$url" || {
@@ -232,9 +314,8 @@ ctx_origin() {
 }
 # ctx_door <context> / host_door <http_host> — the HOST[:PORT] a request must be sent to, read off
 # the same site_url that gives the scheme. On a named ground it is the http_host and nothing
-# changes; on a port-door bench (estate `bench_ports`, site_url http://localhost:8315/) the name
-# resolves to somebody else's nginx and the door is the port, so a suite that types the name
-# reaches the wrong ground and reports its 301 as a defect in the tree (2026-09-20, six suites).
+# changes. A suite that types a name instead reaches the wrong ground and reports its 301 as a
+# defect in the tree (2026-09-20, six suites).
 ctx_door() {
   local url rest; url=$(q "SELECT value FROM modx_context_setting WHERE context_key='$1' AND \`key\`='site_url';")
   origin_of "$url" >/dev/null || {
@@ -318,14 +399,20 @@ require_bench() {
   under_zone "$host" "$zone" && return 0
   echo "REFUSING TO RUN: http_host is '$host', not under the internal zone '${zone:-unset}'. These tests write; bench only." >&2; exit 2
 }
-require_mock_idp() {
-  local ep; ep=$(q "SELECT value FROM modx_system_settings WHERE \`key\`='sso.auth_endpoint';")
-  case "$ep" in
-    *127.0.0.1*|*localhost*) ;;
-    *) under_zone "$ep" "$(internal_zone)" && return 0
-       echo "REFUSING TO RUN: sso.auth_endpoint is '$ep'. These tests sign in as a real person with" >&2
-       echo "no password, so they run against mock-oidc only." >&2; exit 2 ;;
+require_nonprod_door() {
+  # What it protects is that a suite never signs in at PRODUCTION's door (it was named for
+  # the mock until the mock was retired). The door's non-production realms (dev, staging) hold test users
+  # only, so a context whose sso.oidc_auth_endpoint is one of them, or anything in the internal zone
+  # or on loopback, may be driven; anything else refuses. The bench trio it also read is retired.
+  local ctx_ep
+  ctx_ep=$(q "SELECT value FROM modx_context_setting WHERE \`key\`='sso.oidc_auth_endpoint' LIMIT 1;")
+  [ -n "$ctx_ep" ] || { echo "REFUSING TO RUN: no context on this ground has an sso.oidc_auth_endpoint — it signs nobody in." >&2; exit 2; }
+  case "$ctx_ep" in
+    */realms/dev/*|*/realms/staging/*|*127.0.0.1*|*localhost*) return 0 ;;
   esac
+  under_zone "$ctx_ep" "$(internal_zone)" && return 0
+  echo "REFUSING TO RUN: a context's sso.oidc_auth_endpoint is '$ctx_ep' — not a non-production realm of" >&2
+  echo "the door. These suites sign in, and never at production's door." >&2; exit 2
 }
 
 # --- the cache, and the two-second lie ----------------------------------------------------------

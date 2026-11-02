@@ -3,7 +3,9 @@
 This repository is the software half of a multi-site MODx 3 installation: the elements (chunks,
 snippets, plugins, templates) as files, the scripts that install and maintain a MODx database, and
 the tests that check both. The content — documents and the estate's own declarations — lives in a
-separate repository. `docs/modx-enhancement.md` describes every idea here and how they fit.
+separate repository. `docs/modx-enhancement.md` describes every idea here and how they fit. This
+is **pustak**, one of four parts; how MODx, pustak, the content (gyan) and the search (khojo) fit
+together is in the estate repository's `README.md`.
 
 Two decisions shape everything else.
 
@@ -40,7 +42,7 @@ and one program writes it** after every restore and every new install.
   nothing and exits 1 on any difference. It refuses a file with no `environment` or no `settings`.
 - `setup/lib/ApplyEnvironment.php` is its pure half (read, compare, never print a secret), tested
   with no database by `tests/apply-environment.php`.
-- `setup/bench-application.py` renders the file for a development bench; on other installations
+- A development bench renders the file with its own renderer; on other installations
   whoever provisions the server renders it. `docs/apply-environment.md` lists the keys it manages
   and why.
 

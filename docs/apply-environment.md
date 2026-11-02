@@ -15,12 +15,12 @@ again after it. Today that is done by about six jobs, each from a different sour
 - literal SQL in `ops.sh` (`MODX_STAGING_OWNED_SETTINGS`, `_modx_dev_rebind_links`, the staging
   restore's `http_host`/`site_url`/`server_protocol` UPDATE);
 - ansible variables passed to `setup/12`, `setup/13` under tags that run only by hand (`never`);
-- `estate.json` `domains`, read by `setup/10-production-domains.py` and `setup/bench-domains.py`.
+- (retired) `estate.json` `domains` host maps, once read by MODx's own binders; the names are infra's now.
 
 Defects the survey found, each a consequence of that spread: the dev bench keeps production's
 `storage.environment=production` and `modxsearch.ask_url` (no job writes them there); `ops.sh`
 still UPDATEs `corp.base_url` after `setup/02` deleted the row; the staging restore hard-codes
-`https://<ctx>.modx.<internal zone>/` instead of reading `bench_scheme`.
+`https://<ctx>.modx.<internal zone>/` instead of reading the estate's scheme (since retired).
 
 ## The design
 
@@ -45,7 +45,7 @@ still UPDATEs `corp.base_url` after `setup/02` deleted the row; the staging rest
 
 3. **What it manages** — the values the survey found differing by environment:
    - system: `estate_env`, `estate_env_color`, `error_log_filepath`, `kuber.base_url`,
-     `kuber.reader_url`, `modxsearch.ask_url`, `sso.issuer`, `sso.auth_endpoint`,
+     `kuber.reader_url`, `modxsearch.ask_url`, `munshi.backlog_url`, `sso.issuer`, `sso.auth_endpoint`,
      `sso.token_endpoint`, `sso.google_client_id`, `sso.google_client_secret`,
      `storage.base_url`, `storage.modx_token`, `storage.environment`,
      `new_folder_permissions`, `new_file_permissions`;
@@ -60,7 +60,7 @@ still UPDATEs `corp.base_url` after `setup/02` deleted the row; the staging rest
 
 4. **Who renders the file:** infra's `modx-web` role, from the values its verbs and variables
    hold today, for the installations it runs. For a development bench, which has no writer,
-   `setup/bench-application.py` (skunkworks) renders it from `estate.json` and the bench's
+   the bench's own renderer (skunkworks) renders it from `estate.json` and the bench's
    facts.
 
 5. **Who runs the program:** every job that loads a database or sets an installation up ends
@@ -71,7 +71,7 @@ still UPDATEs `corp.base_url` after `setup/02` deleted the row; the staging rest
 
 | Part | Owner | State |
 |---|---|---|
-| `setup/apply-environment.php`, `setup/lib/`, `setup/bench-application.py`, tests | skunkworks | built by this ticket |
+| `setup/apply-environment.php`, `setup/lib/`, the bench's renderer, tests | skunkworks | built by this ticket |
 | `roles/modx-web/templates/application.php.j2` gains `settings` | infra | asked on the ticket |
 | `scripts/ops.sh` restore, settings and binding verbs run the program, drop their literal writes | infra | asked on the ticket |
 | MODx `modSystemSetting` / `modContextSetting` objects | vendor | stock 3.2.4-pl |

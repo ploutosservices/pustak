@@ -17,7 +17,6 @@ import sys
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 READERS = {
     'common/chunks/topNavBar.html': '[[++estate_app_name]]',
-    'common/chunks/Bootstrap.5.googleLogin.html': '[[++estate_app_name]]',
     'common/snippets/unauthorizedNotice.php': "getOption('estate_app_name')",
 }
 passed = failed = 0

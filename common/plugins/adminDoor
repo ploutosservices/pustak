@@ -1,0 +1,381 @@
+/**
+ * adminDoor — the MODx manager signs in at the estate's door as an AppAdmin, and nowhere else.
+ * Events: OnMODXInit, OnManagerPageInit, OnBeforeManagerLogin, OnBeforeWebLogin, OnBeforeManagerLogout.
+ *
+ * claude/shared/design/door-standard-login.md §2 and library-manager-appadmin-skunkworks.md. The manager asks THIS SITE'S OWN
+ * CLIENT at the door (the context's sso.oidc_*, the one its pages sign in with), and admits only an ID
+ * token whose `roles` claim holds AppAdmin. The door grants that role and makes its holder present one
+ * of their machines' certificates at every sign-in (claude/shared/design/door-machines-passkeys-roles.md);
+ * MODx decides from its own records whether that person is an admin here. No user is created, no group
+ * changed. Realm admin is not used (infra removed client modx-admin).
+ *
+ * WHICH SITE. The manager is served on each context's own name and runs in `mgr`, so the context is
+ * the edge's X-Tenant, the same header EdgeContext.php serves the site's pages by.
+ *
+ * THE RETURN ADDRESS IS THE SITE'S /sso-callback, the one the context's client declares. The manager's
+ * state starts with `mgr.`; GoogleSSOCallback sends such a return on to `?modx-admin-callback` here,
+ * unread, and the code is exchanged here with that same redirect_uri.
+ *
+ * THE SWITCH. System setting `sso.admin_door`. Not 1: this plugin does nothing, on every event, and
+ * the manager keeps its own sign-in. It is turned on on the owner's word, after a realm-admin sign-in
+ * works on production. Break-glass is infra setting it back to 0 on the ground.
+ *
+ * WHEN IT IS 1:
+ *   OnManagerPageInit   every manager/index.php request, before MODx checks who is signed in. A
+ *                       visitor not signed in to `mgr` is sent to the door (PKCE);
+ *                       `?modx-admin-callback` finishes that sign-in. Every page it renders ends the
+ *                       request, so nothing falls through to the password form.
+ *   OnMODXInit          every request of any kind (connectors fire no manager event): a session
+ *                       holding `mgr` for a user this plugin did not admit loses `mgr`, before any
+ *                       page or action runs. The mark is $_SESSION['pustak.admin_door'] = the user
+ *                       id, set only by the finish step. So a password sign-in that adds `mgr` where
+ *                       no event below refuses it opens a session that ends on its first use.
+ *   OnBeforeManagerLogin, OnBeforeWebLogin (when it adds `mgr`)
+ *                       a password sign-in, the emailed link and the reset are refused.
+ *
+ * ONLY MODx's DOCUMENTED EXTENSION POINTS: system events, system settings, the registry, and public
+ * modX / modUser methods. No MODx session key is read, no request is parsed, no core file is touched,
+ * so a MODx upgrade that keeps its advertised API keeps this plugin working.
+ *   OnBeforeManagerLogout
+ *                       the mark goes, and the door session is ended on the next manager page: the
+ *                       manager signs out by an AJAX call after which the session is gone, so the
+ *                       id_token waits in the registry for five minutes under a cookie's key.
+ *
+ * Reference codes on its pages: ADM-00 configuration, 01 state, 02 the door's error, 03 no code,
+ * 04 the door's access_denied, 05 token exchange, 06 no id_token, 18 verification,
+ * 09 iss, 10 aud/azp, 11 exp, 12 nonce, 13 email, 14 not an AppAdmin,
+ * 21 acting as someone, 30 no MODx user, 31 more than one, 32 inactive, 33 blocked,
+ * 34 not an Administrator, 35 no manager permission.
+ *
+ * NOT IN THIS BUILD, named so it is not mistaken for done: ending a manager session on a door
+ * disable.
+ */
+
+// SIGNING OUT OF THE SITE SIGNS OUT OF THE MANAGER TOO, whatever the switch says. The owner,
+// 2026-10-24: "either sign me out or show me the button to sign out. you leave me hanging." A site
+// context and the manager keep SEPARATE sessions (each context's own session_name cookie), so the
+// site's sign-out (GoogleSSOLogout) cannot end the manager's. It sends the browser here first, as
+// ?pustak-signout=<its own path>; this runs in the manager's own session, ends `mgr` through the manager's
+// logout events and removeSessionContext, and sends the browser back to the sign-out page's path
+// with mgr=done, which then ends the site and the door session as before.
+if ($modx->event->name === 'OnManagerPageInit' && isset($_GET['pustak-signout'])) {
+    // The way back is the sign-out page's PATH on this same host (the manager is served on each
+    // context's own host). A path only — no scheme, no host, no '//' — so it cannot send anyone off
+    // the site. Not resolved by id: makeUrl answers empty for a page this manager user may not see
+    // (measured), and a context is access-checked too.
+    $path = (string) $_GET['pustak-signout'];
+    $ok = preg_match('#^[A-Za-z0-9][A-Za-z0-9/_.-]{0,199}$#', $path) && strpos($path, '//') === false
+        && strpos($path, '..') === false;
+    if ($modx->user && $modx->user->isAuthenticated('mgr')) {
+        $modx->invokeEvent('OnBeforeManagerLogout', ['user' => $modx->user, 'loginContext' => 'mgr']);
+        $modx->user->removeSessionContext('mgr');
+        $modx->invokeEvent('OnManagerLogout', ['user' => $modx->user, 'loginContext' => 'mgr']);
+    }
+    $modx->sendRedirect(rtrim(MODX_SITE_URL, '/') . '/' . ($ok ? $path . '?mgr=done' : ''));
+    exit;
+}
+
+if ((int) $modx->getOption('sso.admin_door') !== 1) {
+    return;
+}
+
+$markKey  = 'pustak.admin_door';
+$hintKey  = 'pustak.admin_id_token';
+$byeTopic = '/pustak/admin-bye/';
+$byeCookie = 'pustak_admin_bye';
+$closed   = 'Password sign-in to the manager is closed. The manager signs in at the estate door.';
+
+switch ($modx->event->name) {
+
+case 'OnMODXInit':
+    // ONLY DOCUMENTED API (the owner, 2026-10-23: enhance MODx, never risk its upgrades): the session's
+    // contexts through modUser::getSessionContexts(), ended through removeSessionContext().
+    $contexts = $modx->user ? $modx->user->getSessionContexts() : [];
+    if (!isset($contexts['mgr'])) {
+        break;
+    }
+    $uid = (int) $contexts['mgr'];
+    if ($uid > 0 && (int) ($_SESSION[$markKey] ?? 0) === $uid) {
+        break;
+    }
+    // A `mgr` session this plugin did not open — a password session from before the switch, or a
+    // password sign-in that added `mgr` where no refusing event fires — loses `mgr` now, on this
+    // request, before any manager page or connector action runs.
+    $u = $modx->getObject(\MODX\Revolution\modUser::class, $uid);
+    if ($u) {
+        $u->removeSessionContext('mgr');
+    } else {
+        $modx->user->endSession();
+    }
+    unset($_SESSION[$markKey], $_SESSION[$hintKey]);
+    $modx->user = null;
+    $modx->getUser();
+    $modx->log(modX::LOG_LEVEL_WARN, "[adminDoor] a manager session of user $uid not opened at the door was ended");
+    break;
+
+case 'OnBeforeManagerLogin':
+    $modx->event->output($closed);
+    break;
+
+case 'OnBeforeWebLogin':
+    $a = is_array($attributes ?? null) ? $attributes : [];
+    $adds = is_array($a['addContexts'] ?? null) ? $a['addContexts'] : [];
+    if (($a['loginContext'] ?? '') === 'mgr' || in_array('mgr', $adds, true)) {
+        $modx->event->output($closed);
+    }
+    break;
+
+case 'OnBeforeManagerLogout':
+    $hint = (string) ($_SESSION[$hintKey] ?? '');
+    unset($_SESSION[$markKey], $_SESSION[$hintKey]);
+    if ($hint === '') {
+        break;
+    }
+    $key = bin2hex(random_bytes(16));
+    $registry = $modx->getService('registry', 'registry.modRegistry');
+    $register = $registry ? $registry->getRegister('pustak', 'registry.modDbRegister') : null;
+    if ($register && $register->connect()) {
+        $register->subscribe($byeTopic);
+        $register->send($byeTopic, [$key => $hint], ['ttl' => 300]);
+        $register->unsubscribe($byeTopic);
+        setcookie($byeCookie, $key, [
+            'expires'  => time() + 300,
+            'path'     => MODX_MANAGER_URL,
+            'secure'   => MODX_URL_SCHEME === 'https://',
+            'httponly' => true,
+            'samesite' => 'Lax',
+        ]);
+    } else {
+        $modx->log(modX::LOG_LEVEL_ERROR, '[adminDoor] the registry is unreachable: the door session of this manager sign-out stays open');
+    }
+    break;
+
+case 'OnManagerPageInit':
+    require_once rtrim(MODX_CORE_PATH, '/') . '/components/pustak/lib/SsoConfig.php';
+    // The site this manager page is served on: the edge's X-Tenant, as EdgeContext.php reads it.
+    $ctxKey = trim((string) ($_SERVER['HTTP_X_TENANT'] ?? ''));
+    $ctx = (preg_match('/^[A-Za-z0-9_-]{1,100}$/', $ctxKey) && !in_array($ctxKey, ['mgr', 'web'], true))
+         ? $modx->getContext($ctxKey) : null;
+    $sso = $ctx ? SsoConfig::forContext($ctx) : new SsoConfig();
+    if (!$ctx) {
+        $sso->fault = 'no site context for this manager request: X-Tenant is ' . var_export($ctxKey, true);
+    }
+
+    // Every page this plugin draws ends the request. $status 403 for a refusal, 500 for a fault.
+    // A refusal by the door offers Sign out (the site's sign-out, which ends the door session), not
+    // another sign-in that would come straight back to the same refusal (claude/shared/design/door-standard-login.md §2).
+    $page = function (string $ref, string $headline, string $detail, int $status, string $log, bool $out = false) use ($modx, $ctx, $ctxKey) {
+        $modx->log($status === 403 ? modX::LOG_LEVEL_WARN : modX::LOG_LEVEL_ERROR, "[adminDoor] [$ref] $log");
+        @http_response_code($status);
+        header('Content-Type: text/html; charset=UTF-8');
+        header('Cache-Control: no-store');
+        $again = htmlspecialchars(MODX_MANAGER_URL, ENT_QUOTES, 'UTF-8');
+        $bye = ($out && $ctx) ? $modx->makeUrl((int) $ctx->getOption('logout_page'), $ctxKey, '', 'full') : '';
+        $link = is_string($bye) && $bye !== ''
+            ? '<p><a href="' . htmlspecialchars($bye, ENT_QUOTES, 'UTF-8') . '">Sign out</a></p>'
+            : '<p><a href="' . $again . '">Sign in again</a></p>';
+        echo '<!doctype html><html lang="en"><head><meta charset="utf-8">'
+           . '<meta name="viewport" content="width=device-width, initial-scale=1"><title>Manager sign-in</title></head>'
+           . '<body style="font-family:system-ui,sans-serif;max-width:40rem;margin:3rem auto;padding:0 1rem">'
+           . '<h1>' . htmlspecialchars($headline, ENT_QUOTES, 'UTF-8') . '</h1>'
+           . '<p>' . htmlspecialchars($detail, ENT_QUOTES, 'UTF-8') . '</p>'
+           . '<p>Reference: <strong>' . htmlspecialchars($ref, ENT_QUOTES, 'UTF-8') . '</strong></p>'
+           . $link . '</body></html>';
+        exit;
+    };
+
+    // A manager sign-out a moment ago: end the door session too, with the id_token it left behind.
+    $bye = (string) ($_COOKIE[$byeCookie] ?? '');
+    if ($bye !== '' && preg_match('/^[0-9a-f]{32}$/', $bye)) {
+        setcookie($byeCookie, '', ['expires' => time() - 3600, 'path' => MODX_MANAGER_URL]);
+        $hint = '';
+        $registry = $modx->getService('registry', 'registry.modRegistry');
+        $register = $registry ? $registry->getRegister('pustak', 'registry.modDbRegister') : null;
+        if ($register && $register->connect()) {
+            $register->subscribe($byeTopic . $bye);
+            $msgs = $register->read(['poll_limit' => 1, 'msg_limit' => 1, 'remove_read' => true]);
+            $register->unsubscribe($byeTopic . $bye);
+            $hint = is_array($msgs) && $msgs ? (string) reset($msgs) : '';
+        }
+        $end = $sso->fault === '' ? $sso->endSessionEndpoint() : '';
+        if ($hint !== '' && $end !== '') {
+            $modx->sendRedirect($end . '?' . http_build_query(['id_token_hint' => $hint, 'client_id' => $sso->clientId]));
+            exit;
+        }
+    }
+
+    if ($modx->user && $modx->user->isAuthenticated('mgr')) {
+        break;
+    }
+    if ($sso->fault !== '') {
+        $page('ADM-00', 'Manager sign-in is not configured', 'The manager signs in at the estate door, and its client there is not set up on this site.', 500, $sso->fault);
+    }
+    $redirectUri = SsoConfig::redirectUri($ctx);
+
+    // --- start: to the door -------------------------------------------------------------------------
+    // No prompt and no acr_values: a person the door already holds comes back with nothing to do. The
+    // certificate is the door's to ask of an AppAdmin, at every sign-in (door-machines-passkeys-roles.md §1 item 4).
+    if (!isset($_GET['modx-admin-callback'])) {
+        $state    = 'mgr.' . bin2hex(random_bytes(16));
+        $nonce    = bin2hex(random_bytes(16));
+        $verifier = rtrim(strtr(base64_encode(random_bytes(48)), '+/', '-_'), '=');
+        $now      = time();
+        $pending  = is_array($_SESSION['pustak.admin_pending'] ?? null) ? $_SESSION['pustak.admin_pending'] : [];
+        $pending  = array_filter($pending, fn($p) => is_array($p) && ($now - (int) ($p['at'] ?? 0)) < 600);
+        $pending[$state] = ['nonce' => $nonce, 'verifier' => $verifier, 'at' => $now];
+        $_SESSION['pustak.admin_pending'] = array_slice($pending, -10, null, true);
+        $modx->sendRedirect($sso->authEndpoint . '?' . http_build_query([
+            'client_id'             => $sso->clientId,
+            'redirect_uri'          => $redirectUri,
+            'response_type'         => 'code',
+            'scope'                 => 'openid email profile',
+            'state'                 => $state,
+            'nonce'                 => $nonce,
+            'code_challenge'        => rtrim(strtr(base64_encode(hash('sha256', $verifier, true)), '+/', '-_'), '='),
+            'code_challenge_method' => 'S256',
+        ]));
+        exit;
+    }
+
+    // --- finish: the callback ---------------------------------------------------------------------
+    $gotState = (string) ($_GET['state'] ?? '');
+    $pending  = is_array($_SESSION['pustak.admin_pending'] ?? null) ? $_SESSION['pustak.admin_pending'] : [];
+    $started  = ($gotState !== '' && is_array($pending[$gotState] ?? null)) ? $pending[$gotState] : null;
+    unset($pending[$gotState]);
+    $_SESSION['pustak.admin_pending'] = $pending;
+    if ($started === null || (time() - (int) ($started['at'] ?? 0)) >= 600) {
+        $page('ADM-01', 'Manager sign-in could not be completed', 'This sign-in was not started here, or it is too old.', 403, 'state unknown, spent or older than 10 minutes');
+    }
+    if (($_GET['error'] ?? '') === 'access_denied') {
+        $page('ADM-04', 'The door did not let you in', 'The door refused this sign-in, so the manager cannot be opened. An administrator signs in on one of their own machines. Sign out, then sign in again on one.', 403,
+              'the door returned access_denied: ' . preg_replace('/[^a-z_]/', '', (string) ($_GET['error_description'] ?? '')), true);
+    }
+    if (!empty($_GET['error'])) {
+        $page('ADM-02', 'Manager sign-in could not be completed', 'The door did not complete the sign-in.', 403, 'the door returned error=' . preg_replace('/[^a-z_]/', '', (string) $_GET['error']));
+    }
+    $code = (string) ($_GET['code'] ?? '');
+    if ($code === '') {
+        $page('ADM-03', 'Manager sign-in could not be completed', 'The door returned no code.', 403, 'no authorization code in callback');
+    }
+
+    $ch = curl_init($sso->tokenEndpoint);
+    curl_setopt_array($ch, [
+        CURLOPT_POST           => true,
+        CURLOPT_POSTFIELDS     => http_build_query([
+            'code'          => $code,
+            'client_id'     => $sso->clientId,
+            'client_secret' => $sso->clientSecret,
+            'redirect_uri'  => $redirectUri,
+            'grant_type'    => 'authorization_code',
+            'code_verifier' => (string) ($started['verifier'] ?? ''),
+        ]),
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_TIMEOUT        => 12,
+        CURLOPT_HTTPHEADER     => ['Accept: application/json'],
+    ]);
+    $body = curl_exec($ch);
+    $http = curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
+    $cerr = curl_error($ch);
+    curl_close($ch);
+    if ($body === false || $http !== 200) {
+        $page('ADM-05', 'Manager sign-in could not be completed', 'The door did not exchange the code.', 500, "token exchange failed (http=$http, curl=$cerr)");
+    }
+    $tok = json_decode((string) $body, true);
+    $idToken = is_array($tok) ? (string) ($tok['id_token'] ?? '') : '';
+    if ($idToken === '') {
+        $page('ADM-06', 'Manager sign-in could not be completed', 'The door returned no identity.', 500, 'token response has no id_token');
+    }
+
+    // Verified by the estate's one verifier, with this site's door issuer and keys, before any claim is read.
+    require_once rtrim(MODX_CORE_PATH, '/') . '/components/pustak/lib/GoogleToken.php';
+    $jwksUri = $sso->jwksUri;
+    if ($jwksUri === '') {
+        $page('ADM-18', 'Manager sign-in could not be completed', 'The door\'s keys could not be found.', 500, 'no JWKS: sso.admin_oidc_jwks_uri is empty and the issuer published none');
+    }
+    $why = null;
+    $email = \Kuber\Core\GoogleToken::verify($idToken, [$sso->clientId], $why, function () use ($jwksUri) {
+        $c = curl_init($jwksUri);
+        curl_setopt_array($c, [CURLOPT_RETURNTRANSFER => true, CURLOPT_TIMEOUT => 8,
+                               CURLOPT_HTTPHEADER => ['Accept: application/json']]);
+        $b = curl_exec($c);
+        $ok = curl_getinfo($c, CURLINFO_RESPONSE_CODE) === 200;
+        curl_close($c);
+        $j = ($ok && is_string($b)) ? json_decode($b, true) : null;
+        return is_array($j) ? $j : null;
+    }, $sso->issuers);
+    if ($email === null) {
+        $page('ADM-18', 'Manager sign-in refused', 'The identity the door returned did not verify.', 403, 'id_token failed verification: ' . (string) $why);
+    }
+    $seg = explode('.', $idToken)[1];
+    $claims = json_decode((string) base64_decode(strtr($seg, '-_', '+/') . str_repeat('=', (4 - strlen($seg) % 4) % 4)), true);
+    $claims = is_array($claims) ? $claims : [];
+
+    // Another realm's token is refused, even one signed by the same door.
+    if (($claims['iss'] ?? '') !== $sso->issuers[0]) {
+        $page('ADM-09', 'Manager sign-in refused', 'This identity is not from this site\'s door.', 403, 'iss ' . var_export($claims['iss'] ?? null, true));
+    }
+    $aud = $claims['aud'] ?? null;
+    $auds = is_string($aud) ? [$aud] : (is_array($aud) ? $aud : []);
+    if (!in_array($sso->clientId, $auds, true) || ($claims['azp'] ?? '') !== $sso->clientId) {
+        $page('ADM-10', 'Manager sign-in refused', 'This identity was not issued to the manager.', 403, 'aud or azp is not ' . $sso->clientId);
+    }
+    if ((int) ($claims['exp'] ?? 0) <= time()) {
+        $page('ADM-11', 'Manager sign-in refused', 'This identity has expired.', 403, 'id_token expired');
+    }
+    $nonce = (string) ($started['nonce'] ?? '');
+    if ($nonce === '' || ($claims['nonce'] ?? '') !== $nonce) {
+        $page('ADM-12', 'Manager sign-in refused', 'This identity was not issued for this sign-in.', 403, 'nonce mismatch');
+    }
+    // APPADMIN, THE DOOR'S ROLE (door-machines-passkeys-roles.md §1 item 3): a top-level `roles` list.
+    $roles = is_array($claims['roles'] ?? null) ? array_values(array_filter($claims['roles'], 'is_string')) : [];
+    if (!in_array('AppAdmin', $roles, true)) {
+        $page('ADM-14', 'Manager sign-in refused', 'The door does not name you an application administrator.', 403,
+              'roles ' . json_encode($claims['roles'] ?? null), true);
+    }
+    $email = strtolower(trim($email));
+    if ($email === '') {
+        $page('ADM-13', 'Manager sign-in refused', 'The door returned no verified email.', 403, 'no verified email');
+    }
+    // Acting as the owner never reaches the owner's manager.
+    if (array_key_exists('impersonator', $claims)) {
+        $page('ADM-21', 'Manager sign-in refused', 'The manager cannot be entered while acting as someone else.', 403,
+              'impersonator ' . var_export($claims['impersonator'], true) . " acting as $email");
+    }
+
+    // MODx decides, from its own records. Profile email is not unique, so exactly one user.
+    $profiles = $modx->getCollection(\MODX\Revolution\modUserProfile::class, ['email' => $email]);
+    if (count($profiles) !== 1) {
+        $page(count($profiles) ? 'ADM-31' : 'ADM-30', 'Manager sign-in refused',
+              count($profiles) ? "More than one account on this site has the address $email." : "There is no account on this site for $email.",
+              403, count($profiles) . " MODx users have the email $email");
+    }
+    $profile = reset($profiles);
+    $user = $modx->getObject(\MODX\Revolution\modUser::class, (int) $profile->get('internalKey'));
+    if (!$user || !$user->get('active')) {
+        $page('ADM-32', 'Manager sign-in refused', "The account for $email is not active.", 403, "user for $email is inactive or missing");
+    }
+    $now = time();
+    $until = (int) $profile->get('blockeduntil');
+    $after = (int) $profile->get('blockedafter');
+    if (($profile->get('blocked') && ($until === 0 || $until > $now)) || ($after > 0 && $after < $now)) {
+        $page('ADM-33', 'Manager sign-in refused', "The account for $email is blocked.", 403, "user for $email is blocked");
+    }
+    if (!$user->isMember('Administrator')) {
+        $page('ADM-34', 'Manager sign-in refused', "The account for $email is not a manager administrator.", 403, "user for $email is not in Administrator");
+    }
+
+    // The session. addSessionContext regenerates the session id.
+    $user->addSessionContext('mgr');
+    $_SESSION[$markKey] = (int) $user->get('id');
+    $modx->user = null;
+    $modx->getUser('mgr', true);
+    if (!$modx->hasPermission('frames')) {
+        $modx->user->endSession();
+        $page('ADM-35', 'Manager sign-in refused', "The account for $email may not use the manager.", 403, "user for $email lacks the frames permission");
+    }
+    $_SESSION[$hintKey] = $idToken;
+    $modx->logManagerAction('login', \MODX\Revolution\modContext::class, 'mgr', (int) $user->get('id'));
+    $modx->log(modX::LOG_LEVEL_INFO, "[adminDoor] $email signed in to the manager as AppAdmin, roles " . json_encode($roles));
+    $modx->sendRedirect(MODX_URL_SCHEME . MODX_HTTP_HOST . MODX_MANAGER_URL);
+    exit;
+}

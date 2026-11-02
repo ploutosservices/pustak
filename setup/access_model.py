@@ -121,8 +121,11 @@ def machine_door_uris():
             f'of the element behind it. That is a state to stop on, not to converge.'
         ) from exc
     routes = ((manifest.get('identity') or {}).get('routes') or [])
+    # A row whose `served_by` is a plugin is answered on OnPageNotFound, with no resource at its
+    # path (estateBrand, /.well-known/estate-brand.json) — there is no row to exempt or bind.
     return tuple(sorted({str(r.get('path', '')).lstrip('/')
-                         for r in routes if str(r.get('path', '')).strip('/')}))
+                         for r in routes if str(r.get('path', '')).strip('/')
+                         and not str(r.get('served_by', '')).startswith('plugin:')}))
 
 
 MACHINE_DOORS = machine_door_uris()

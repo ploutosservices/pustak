@@ -55,8 +55,7 @@ def check(ok, label, detail=""):
 def groups_for(declared_contexts, groups_block):
     """Import setup/estate against a throwaway estate file and return (rc, GROUPS, stderr).
 
-    A SUBPROCESS PER CASE, for the reason bench-scheme-is-declared.py gives: `estate.py` reads
-    MODX_ESTATE at import time and caches it, so re-importing in one process would keep the first
+    A SUBPROCESS PER CASE: `estate.py` reads MODX_ESTATE at import time and caches it, so re-importing in one process would keep the first
     estate and the test would assert many times about one file while appearing to cover many.
     """
     contexts = {c: {"name": c.title(), "description": "", "rank": 2 + i,
@@ -69,8 +68,7 @@ def groups_for(declared_contexts, groups_block):
             "contexts": contexts,
             "admin_username": "t",
             "users": [], "groups": groups_block, "system_settings": {},
-            "domains": {"contexts": list(declared_contexts), "prod": {},
-                        "bench_zone": "modx.example"},
+            "domains": {"contexts": list(declared_contexts)},
         }))
         code = ("import sys, json; sys.path.insert(0, %r); import estate; "
                 "print(json.dumps({k: v[0] for k, v in estate.GROUPS.items()}))"

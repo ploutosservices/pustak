@@ -1,0 +1,5 @@
+OnMODXInit
+OnManagerPageInit
+OnBeforeManagerLogin
+OnBeforeWebLogin
+OnBeforeManagerLogout

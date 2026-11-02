@@ -30,10 +30,12 @@ OUT="$ESTATE_REPO/install/modx-docroot.tar.gz"
 
 # --- guard: bench, not prod. config.inc.php is excluded from the tar, but if this tree IS prod we
 # --- must not build from it at all — its manager/, assets/ and components/ are prod's.
-# The bench zone is the estate's declaration (estate.json domains.bench_zone), never typed here.
-BENCH_ZONE=$(python3 "$(dirname "$0")/estate-get.py" domains.bench_zone) || { echo "REFUSING: the estate declares no bench zone, so this tree cannot be told from production." >&2; exit 1; }
-if ! grep -qF "$BENCH_ZONE" "$MODX_ROOT/core/config/config.inc.php" 2>/dev/null; then
-  echo "REFUSING: $MODX_ROOT/core/config/config.inc.php does not look like the bench (*.$BENCH_ZONE)." >&2
+# The tree says which environment it is: application.php's `environment` (infra's render on a ground,
+# the bench renderer's on a bench).
+TREE_ENV=$(php -r '$a = @include $argv[1]; echo is_array($a) ? ($a["environment"] ?? "") : "";' \
+  "$MODX_ROOT/core/config/application.php" 2>/dev/null) || TREE_ENV=""
+if [ "$TREE_ENV" != "development" ]; then
+  echo "REFUSING: $MODX_ROOT/core/config/application.php says environment '${TREE_ENV:-(none)}', not development." >&2
   echo "The docroot tar must be built from the bench, never from production." >&2
   exit 1
 fi

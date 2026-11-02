@@ -161,7 +161,7 @@ class GoogleToken {
      * issuer's own discovery document names `jwks_uri`. Cached on disk per issuer
      * exactly as Google's are, so a page render does not depend on the round trip.
      *
-     * For reader.php's declared non-Google issuers — a ground's mock-oidc. Whether an issuer
+     * For reader.php's declared non-Google issuers — the estate sign-in door. Whether an issuer
      * may be trusted at all is the CALLER's decision; this only fetches what it publishes.
      */
     public static function issuerJwks(string $issuer, ?string &$why = null): ?array {

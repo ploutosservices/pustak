@@ -7,17 +7,14 @@
  * WHAT IS UNDER TEST. A MODx page must be able to read a value from kuber at render time
  * under the identity of the person reading it, and render BLANK when there is no identity
  * (the owner, 2026-07-29: *"if not logged in, display blank"*). `&auth` is how tableRenderer presents
- * that identity: a 60-second RS256 JWT, minted server-side, sent as `Authorization: Bearer`.
+ * that identity: the reader's door access token EXCHANGED at the door for the &auth audience,
+ * sent as `Authorization: Bearer`. MODx mints nothing.
  *
- * WHY THE PIECES ARE REAL RATHER THAN MODELLED. Three things here could each be got wrong in a way
- * a self-consistent test would agree with enthusiastically:
+ * WHY THE PIECES ARE REAL RATHER THAN MODELLED:
  *
- *   1. THE TOKEN. It is verified by `Kuber\Core\Crypto::jwtVerify()` — kuber's own production
- *      verifier, loaded from their checkout — not by a re-implementation in this file. If the two
- *      sides disagree about b64url padding, the signing input, or the claim names, that is exactly
- *      the failure this must catch, and a verifier I wrote would share my mistake. When kuber's
- *      checkout is absent the test REFUSES to run rather than quietly dropping to the weaker
- *      check; `ALLOW_NO_KUBER=1` is the explicit opt-out for someone who has only this repo.
+ *   1. THE EXCHANGE. The snippet's own SsoConfig::exchangeFor posts to a door on loopback, which
+ *      records the form it was sent (grant, subject token, audience, scope, client) and answers
+ *      with a token named for the audience — or refuses, for the negative case.
  *   2. THE HEADER. Asserted from the receiving end — a real HTTP server on loopback that records
  *      the Authorization header it was actually sent. Inspecting a variable inside the snippet
  *      would prove the string was built, not that it left the process.
@@ -33,35 +30,11 @@ $HOME = getenv('HOME');
 $REPO = dirname(__DIR__);
 
 $SNIPPET = getenv('TABLERENDERER') ?: $REPO . '/common/snippets/tableRenderer.php';
-$CRYPTO  = getenv('KUBER_CRYPTO')  ?: $HOME . '/gitea/work-products/kuber/php/Core/Crypto.php';
 
 if (!is_file($SNIPPET)) {
     fwrite(STDERR, "tableRenderer.php not found at $SNIPPET\n");
     exit(2);
 }
-if (!is_file($CRYPTO)) {
-    if (getenv('ALLOW_NO_KUBER') !== '1') {
-        fwrite(STDERR, "REFUSING TO RUN: kuber's own verifier is not at $CRYPTO.\n"
-            . "The point of this test is that the token is verified by the code that will verify\n"
-            . "it in production, not by a copy of it. Set KUBER_CRYPTO, or ALLOW_NO_KUBER=1 to\n"
-            . "run the rest of the suite knowingly without the cross-verify.\n");
-        exit(2);
-    }
-    fwrite(STDERR, "WARNING: running WITHOUT kuber's verifier — token claims are unchecked.\n");
-} else {
-    require $CRYPTO;
-}
-$HAVE_CRYPTO = is_file($CRYPTO);
-
-// ---- keys ------------------------------------------------------------------------------------
-/** @return array{0:string,1:string} [privatePem, publicPem] */
-function keypair(): array {
-    $k = openssl_pkey_new(['private_key_bits' => 2048, 'private_key_type' => OPENSSL_KEYTYPE_RSA]);
-    openssl_pkey_export($k, $priv);
-    return [$priv, openssl_pkey_get_details($k)['key']];
-}
-[$PRIV, $PUB]             = keypair();
-[$OTHER_PRIV, $OTHER_PUB] = keypair();   // the wrong key, for the probe control
 
 // ---- the receiving end -----------------------------------------------------------------------
 // A real server, so "the header was sent" is measured where it arrives. It also writes one line
@@ -76,6 +49,18 @@ file_put_contents("$TMP/router.php", <<<'PHP'
 <?php
 $path = parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH);
 $auth = $_SERVER['HTTP_AUTHORIZATION'] ?? '';
+if ($path === '/token') {
+    // The door: records the exchange it was asked for, answers a token named for the audience.
+    file_put_contents(getenv('TRAUTH_LOG'), "/token\t" . json_encode($_POST) . "\n", FILE_APPEND);
+    header('Content-Type: application/json');
+    if (($_POST['subject_token'] ?? '') === 'refused-by-the-door') {
+        http_response_code(400);
+        echo '{"error":"invalid_request"}';
+        return;
+    }
+    echo json_encode(['access_token' => 'exchanged-for-' . ($_POST['audience'] ?? ''), 'token_type' => 'Bearer']);
+    return;
+}
 file_put_contents(getenv('TRAUTH_LOG'), $path . "\t" . $auth . "\n", FILE_APPEND);
 if ($path === '/deny') {
     http_response_code(403);
@@ -106,6 +91,8 @@ register_shutdown_function(function () use ($server, $TMP) {
         proc_terminate($server);
         proc_close($server);
     }
+    @unlink("$TMP/core/components/pustak/lib");
+    foreach (["$TMP/core/components/pustak", "$TMP/core/components", "$TMP/core"] as $d) { @rmdir($d); }
     array_map('unlink', glob("$TMP/*") ?: []);
     @rmdir($TMP);
 });
@@ -115,6 +102,12 @@ for ($i = 0; $i < 100; $i++) {                       // wait for it to actually 
     usleep(50000);
 }
 $BASE = "http://127.0.0.1:$PORT";
+
+// The snippet loads SsoConfig from MODx's own place (core/components/pustak/lib/), so that place is
+// this repository's common/lib for the run.
+@mkdir("$TMP/core/components/pustak", 0700, true);
+symlink("$REPO/common/lib", "$TMP/core/components/pustak/lib");
+define('MODX_CORE_PATH', "$TMP/core/");
 
 // ---- $modx, stubbed to exactly what the snippet touches --------------------------------------
 class StubParser {
@@ -169,12 +162,17 @@ if (str_starts_with(ltrim($code), '<?php')) {
 /** Run the snippet in its own scope so nothing leaks between cases. */
 $run = function ($modx, $scriptProperties) use ($code) { return eval($code); };
 
-/** A fresh $modx with a signed-in, SSO-verified reader and the private key in place. */
-$fresh = function (string $email = 'someone@example.org') use ($PRIV) {
+/** A fresh $modx with a signed-in, door-verified reader, its access token, and this context's door client. */
+$fresh = function (string $email = 'someone@example.org') use ($BASE) {
     $m = new StubModx();
     $m->user = new StubUser($email);
-    $m->settings['kuber.jwt_private_key'] = $PRIV;
-    $_SESSION = ['sso.verified_email' => $email];
+    $m->settings += [
+        'sso.oidc_issuer' => "$BASE/realms/dev", 'sso.oidc_auth_endpoint' => "$BASE/auth",
+        'sso.oidc_token_endpoint' => "$BASE/token", 'sso.oidc_jwks_uri' => "$BASE/certs",
+        'sso.oidc_client_id' => 'modx-family', 'sso.oidc_client_secret' => 'client-secret-for-the-test',
+    ];
+    $_SESSION = ['sso.verified_email' => $email, 'sso.access_token' => 'the-readers-access-token',
+                 'sso.id_token' => 'the-readers-own-id-token'];
     return $m;
 };
 
@@ -205,34 +203,29 @@ $out = $run($m, ['url' => "$BASE/t1", 'rows' => 'rows', 'auth' => 'kuber']);
 $seen = $requests('/t1');
 $check('a request is made', count($seen) === 1, 'requests to /t1: ' . count($seen));
 $sent = $seen[0] ?? '';
-$check('an Authorization: Bearer header arrives at the endpoint',
-    (bool) preg_match('/^Bearer [A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+$/', $sent),
-    "header was: '$sent'");
+$check('the Bearer that arrives is the token the door exchanged for kuber',
+    $sent === 'Bearer exchanged-for-kuber', "header was: '$sent'");
+$check("...never the reader's own id_token or access token",
+    !str_contains($sent, 'the-readers-own-id-token') && !str_contains($sent, 'the-readers-access-token'), $sent);
 $check('the table renders', str_contains($out, '<table'), substr($out, 0, 300));
 
-$jwt = preg_replace('/^Bearer /', '', $sent);
-// The three controls below are only meaningful once there IS a token: "refused against the wrong
-// key" is trivially true of an empty string, and a check that stays green over an empty haystack
-// is worse than one that goes red. So they are gated on the positive case having produced one.
-if ($HAVE_CRYPTO && $jwt !== '') {
-    $check("kuber's own jwtVerify() accepts it and returns the reader's email",
-        \Kuber\Core\Crypto::jwtVerify($jwt, $PUB, 'modx', 'kuber') === 'someone@example.org',
-        'jwtVerify returned: ' . var_export(\Kuber\Core\Crypto::jwtVerify($jwt, $PUB, 'modx', 'kuber'), true));
-    // The controls that prove the line above can say no.
-    $check('the same token is REFUSED against a different public key',
-        \Kuber\Core\Crypto::jwtVerify($jwt, $OTHER_PUB, 'modx', 'kuber') === null);
-    $check("aud is really 'kuber' (refused when another audience is expected)",
-        \Kuber\Core\Crypto::jwtVerify($jwt, $PUB, 'modx', 'roster') === null);
-    $check("iss is really 'modx' (refused when another issuer is expected)",
-        \Kuber\Core\Crypto::jwtVerify($jwt, $PUB, 'another-app', 'kuber') === null);
-} elseif ($HAVE_CRYPTO) {
-    $check("kuber's own jwtVerify() accepts the token", false, 'no token was produced to verify');
-}
-$claims = json_decode(base64_decode(strtr(explode('.', $jwt)[1] ?? '', '-_', '+/')), true) ?: [];
-$check('the assertion lives 60 seconds — it is a request credential, not a session',
-    ($claims['exp'] ?? 0) - ($claims['iat'] ?? 0) === 60,
-    'iat=' . ($claims['iat'] ?? 'absent') . ' exp=' . ($claims['exp'] ?? 'absent'));
-$check('the token is not stale on arrival', ($claims['exp'] ?? 0) > time());
+$asked = json_decode($requests('/token')[0] ?? '{}', true) ?: [];
+$check('the door was asked for a token exchange', ($asked['grant_type'] ?? '') === 'urn:ietf:params:oauth:grant-type:token-exchange',
+    var_export($asked, true));
+$check("...of the reader's access token", ($asked['subject_token'] ?? '') === 'the-readers-access-token'
+    && ($asked['subject_token_type'] ?? '') === 'urn:ietf:params:oauth:token-type:access_token');
+$check('...for audience kuber, scope audience-kuber (the &auth name)',
+    ($asked['audience'] ?? '') === 'kuber' && in_array('audience-kuber', explode(' ', $asked['scope'] ?? ''), true));
+// Without openid in the exchange's scope the door drops openid from this client's session, and every
+// later refresh comes back with no id_token, so ssoRenew ends the reader's session.
+$check("...keeping the sign-in's scope, so the session still renews",
+    !array_diff(['openid', 'email', 'profile'], explode(' ', $asked['scope'] ?? '')), 'scope: ' . ($asked['scope'] ?? ''));
+$check("...by this context's own door client", ($asked['client_id'] ?? '') === 'modx-family');
+
+$m = $fresh();
+$out = $run($m, ['url' => "$BASE/t1b", 'rows' => 'rows', 'auth' => 'roster']);
+$check('another &auth name exchanges for that audience', $requests('/t1b') === ['Bearer exchanged-for-roster'],
+    var_export($requests('/t1b'), true));
 
 // --- 2. no identity => blank, and NOTHING is asked of kuber -----------------------------------
 $m = $fresh();
@@ -254,21 +247,25 @@ $out = $run($m, ['url' => "$BASE/t4", 'rows' => 'rows', 'auth' => 'kuber']);
 $check('a reader not authenticated in this context asserts nobody',
     $requests('/t4') === [] && !str_contains($out, '<table'), $out);
 
-// --- 3. a missing key must never mean "ask anyway, as nobody" ----------------------------------
+// --- 3. no exchange must never mean "ask anyway" with some other token --------------------------
 $m = $fresh();
-$m->settings['kuber.jwt_private_key'] = '';
+unset($_SESSION['sso.access_token']);
 $out = $run($m, ['url' => "$BASE/t5", 'rows' => 'rows', 'auth' => 'kuber']);
-$check('an absent signing key refuses rather than fetching unauthenticated',
+$check('no access token in the session: no request, no table',
     $requests('/t5') === [] && !str_contains($out, '<table'), $out);
-$check('...and says which setting is missing', str_contains($out, 'kuber.jwt_private_key'), $out);
+$check('...and says the door gave no token', str_contains($out, 'the door gave no token'), $out);
 
-// A truncated key is the failure infra explicitly warned about — a mangled 1703-character
-// string in a password field looks exactly like a good one. It must refuse, not raise.
 $m = $fresh();
-$m->settings['kuber.jwt_private_key'] = substr($PRIV, 0, 400);
+$_SESSION['sso.access_token'] = 'refused-by-the-door';
 $out = $run($m, ['url' => "$BASE/t5b", 'rows' => 'rows', 'auth' => 'kuber']);
-$check('an unusable key refuses without taking the page down',
+$check('the door refuses the exchange: no request, and the page survives',
     $requests('/t5b') === [] && !str_contains($out, '<table') && str_starts_with($out, '<!--'), $out);
+
+$m = $fresh();
+$m->settings['kuber.jwt_private_key'] = 'a-retired-signing-key';
+$out = $run($m, ['url' => "$BASE/t5c", 'rows' => 'rows', 'auth' => 'kuber']);
+$check('a kuber.jwt_private_key still in settings is not used: the exchanged token is sent',
+    $requests('/t5c') === ['Bearer exchanged-for-kuber'], var_export($requests('/t5c'), true));
 
 // --- 4. the refusals that are about the call, not the reader -----------------------------------
 $m   = $fresh();

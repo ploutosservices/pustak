@@ -128,19 +128,19 @@ OUT=$(env MODX_ESTATE="$WORK/typo.json" python3 -c \
       'import sys; sys.path.insert(0,"setup"); import estate' 2>&1); RC=$?
 check $([ "$RC" != 0 ] && echo 1 || echo 0) "a misspelled key refuses" "rc=$RC out=$OUT"
 
-# 7. A context with no hostname must REFUSE — it would install and then resolve nowhere, which
-#    looks like a DNS fault for as long as anyone is willing to believe that.
+# 7. A context absent from domains.contexts must REFUSE — infra names no host for it, so it would
+#    install and then resolve nowhere, which looks like a DNS fault for as long as anyone believes it.
 cat > "$WORK/nohost.json" <<'JSON'
 {"contexts": {"a": {"name":"A","description":"","rank":2,"site_name":"A","protected":true}},
- "domains": {"contexts": [], "prod": {}, "bench_zone": null}}
+ "domains": {"contexts": []}}
 JSON
 OUT=$(env MODX_ESTATE="$WORK/nohost.json" python3 -c \
       'import sys; sys.path.insert(0,"setup"); import estate' 2>&1); RC=$?
-check $([ "$RC" != 0 ] && echo 1 || echo 0) "a context with no hostname refuses" "rc=$RC out=$OUT"
+check $([ "$RC" != 0 ] && echo 1 || echo 0) "a context absent from domains.contexts refuses" "rc=$RC out=$OUT"
 
 # 8. The shipped example must actually load — documentation that does not work is worse than none.
 OUT=$(env MODX_ESTATE="$REPO/setup/estate.example.json" python3 -c \
-      'import sys; sys.path.insert(0,"setup"); import estate, domains; print(len(estate.CONTEXTS), len(domains.PROD))' 2>&1); RC=$?
+      'import sys; sys.path.insert(0,"setup"); import estate, domains; print(len(estate.CONTEXTS), len(domains.CONTEXTS))' 2>&1); RC=$?
 check $([ "$RC" = 0 ] && [ "$OUT" = "2 2" ] && echo 1 || echo 0) \
       "setup/estate.example.json loads and routes" "rc=$RC out=$OUT"
 

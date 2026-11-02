@@ -36,16 +36,8 @@
   },
 
 
-  "_domains": "context -> public host. 'contexts' may list MORE than 'contexts' above: a context added later by setup/11-add-context still needs a hostname. 'bench_zone' is the bench zone; each context gets <context>.<bench_zone>. Omit bench_zone if you have no bench. 'bench_ports' gives each context a port for a `php -S` bench (setup/bench-server.php, profile 'local'); omit it if you serve the bench through a web server. 'bench_scheme' is http or https and defaults to http — set it to https when the bench sits behind a TLS edge, or MODx generates absolute links on the wrong scheme while the edge quietly redirects them back.",
+  "_domains": "the contexts MODx serves. 'contexts' may list MORE than 'contexts' above: a context added later by setup/11-add-context is listed here too. Which host name each answers to is not the estate's: the installation's core/config/application.php carries it, written by setup/apply-environment.php.",
   "domains": {
-    "contexts": ["public", "members"],
-    "prod": {
-      "public":  ["www.example.com",     "https"],
-      "members": ["members.example.com", "https"]
-    },
-    "bench_zone": "modx.example.internal",
-    "bench_scheme": "http",
-    "bench_ports": { "public": 8401, "members": 8402 },
-    "local_scheme": "http"
+    "contexts": ["public", "members"]
   }
 }

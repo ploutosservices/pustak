@@ -67,41 +67,45 @@ if (!$modx->user || $ctxKey === '' || !$modx->user->isAuthenticated($ctxKey)) {
 $idToken = (string) ($_SESSION['sso.id_token'] ?? '');
 require_once rtrim(MODX_CORE_PATH, '/') . '/components/pustak/lib/SsoConfig.php';
 $sso = SsoConfig::forContext($modx);
-if ($sso->provider === 'oidc') {
-    $audience   = $sso->clientId;
-    $jwksUri    = $sso->jwksUri;
-    $issuers    = $sso->issuers;
-    $jwksSource = $jwksUri === '' ? null : function () use ($jwksUri) {
-        $c = curl_init($jwksUri);
-        curl_setopt_array($c, [CURLOPT_RETURNTRANSFER => true, CURLOPT_TIMEOUT => 8,
-                               CURLOPT_HTTPHEADER => ['Accept: application/json']]);
-        $b  = curl_exec($c);
-        $ok = curl_getinfo($c, CURLINFO_RESPONSE_CODE) === 200;
-        curl_close($c);
-        $j = ($ok && is_string($b)) ? json_decode($b, true) : null;
-        return is_array($j) ? $j : null;
-    };
-} else {
-    $audience   = trim((string) $modx->getOption('sso.google_client_id', null, ''));
-    $jwksSource = null;
-    $issuers    = null;
-}
+$audience   = $sso->clientId;
+$jwksUri    = $sso->jwksUri;
+$issuers    = $sso->issuers;
+$jwksSource = $jwksUri === '' ? null : function () use ($jwksUri) {
+    $c = curl_init($jwksUri);
+    curl_setopt_array($c, [CURLOPT_RETURNTRANSFER => true, CURLOPT_TIMEOUT => 8,
+                           CURLOPT_HTTPHEADER => ['Accept: application/json']]);
+    $b  = curl_exec($c);
+    $ok = curl_getinfo($c, CURLINFO_RESPONSE_CODE) === 200;
+    curl_close($c);
+    $j = ($ok && is_string($b)) ? json_decode($b, true) : null;
+    return is_array($j) ? $j : null;
+};
 $why = null;
 $verifiedEmail = null;
-if ($idToken !== '' && $audience !== '' && ($sso->provider !== 'oidc' || $jwksSource !== null)) {
+if ($idToken !== '' && $audience !== '' && $jwksSource !== null) {
     require_once rtrim(MODX_CORE_PATH, '/') . '/components/pustak/lib/GoogleToken.php';
     $verifiedEmail = \Kuber\Core\GoogleToken::verify($idToken, [$audience], $why, $jwksSource, $issuers);
 } else {
     $why = $idToken === '' ? 'no id_token in session'
-         : ($audience === '' ? 'no audience for this context (' . $sso->provider . ')' : 'the oidc provider has no keys address');
+         : ($audience === '' ? 'no audience for this context (no client at the door)' : 'the door has no keys address');
 }
 if ($verifiedEmail === null) {
     $modx->log(modX::LOG_LEVEL_ERROR, "folderSearch: the reader's token did not validate ($why) — ending the "
         . 'MODx session; they sign in again and get a fresh one.');
     $modx->user->removeSessionContext($ctxKey);
     unset($_SESSION['sso.id_token'], $_SESSION['sso.id_token_exp'], $_SESSION['sso.verified_email'],
-          $_SESSION['sso.refresh_token']);
+          $_SESSION['sso.refresh_token'], $_SESSION['sso.access_token']);
     return $say('Your sign-in has expired. Sign in again to ask about these pages.');
+}
+
+// ---- the token khojo is sent: the reader's EXCHANGED at the door for khojo ----------------------
+// Not the reader's own id_token (addressed to this MODx context): khojo checks aud = itself and azp =
+// a MODx context client. No exchange, no call — never the reader's own token instead.
+$forKhojo = $sso->exchangeFor((string) ($_SESSION['sso.access_token'] ?? ''), 'khojo');
+if ($forKhojo === '') {
+    $modx->log(modX::LOG_LEVEL_ERROR, 'folderSearch: the door gave no token for khojo (no access token in '
+        . 'the session, or the exchange was refused) — the search did not run.');
+    return $say('The search could not run just now. Sign out and in again if it keeps happening.');
 }
 
 // ---- one request: the words, this folder's context, the answer as a feed ---------------------
@@ -117,7 +121,7 @@ curl_setopt_array($ch, [
     CURLOPT_FOLLOWLOCATION => false,   // a 302 elsewhere would carry the credential off-host
     // The reader's token and nothing else: MODx's own application badge is not this service's.
     CURLOPT_HTTPHEADER     => ['Content-Type: application/json', 'Accept: application/json',
-                               "Authorization: Bearer $idToken"],
+                               "Authorization: Bearer $forKhojo"],
 ]);
 $body = curl_exec($ch);
 $code = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);

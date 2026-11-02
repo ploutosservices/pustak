@@ -14,6 +14,14 @@
 set -uo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.." || exit 2
 
+# The door's issuer, for the one PHP suite that discovers against the live provider
+# (sso-provider-per-context.php): the ground's first context row says where it signs in. A ground
+# that cannot answer leaves it unset and that suite skips the probe, aloud.
+if [ -z "${MODX_DOOR_ISSUER:-}" ]; then
+  MODX_DOOR_ISSUER=$(bash -c '. tests/lib.sh >/dev/null 2>&1; q "SELECT value FROM modx_context_setting WHERE \`key\`='"'"'sso.oidc_issuer'"'"' LIMIT 1;"' 2>/dev/null)
+  export MODX_DOOR_ISSUER
+fi
+
 # ── the ground's PHP, not this machine's ───────────────────────────────────────────────────────
 # infra ruled on 2026-08-13: on the staging ground the PHP that matters is the one
 # INSIDE the MODx container, and they render MODX_PHP_RUN='docker exec -i modx-staging php'. This
@@ -51,14 +59,18 @@ suites=(
   "$PHP_RUN $REPO/tests/actuator-verdicts.php"
   "$PHP_RUN $REPO/tests/actuator-typed.php"
   "$PHP_RUN $REPO/tests/context-base.php"
+  "$PHP_RUN $REPO/tests/standing-and-term.php"
   "$PHP_RUN $REPO/tests/diagnostics.php"
   "bash tests/estate-clean.sh"
   "bash tests/verify-protection-wrong-class.sh"
   "$PHP_RUN $REPO/tests/tableRenderer-auth.php"
+  "$PHP_RUN $REPO/tests/tableRenderer-backlog-record.php"
   "bash tests/clear-cache-reaches-contexts.sh"
   "bash tests/head-favicon.sh"
   "$PHP_RUN $REPO/tests/jump-nav.php"
+  "$PHP_RUN $REPO/tests/tenant-jumps.php"
   "bash tests/protect-on-save.sh"
+  "bash tests/create-documents.sh"
   "bash tests/protected-absorb.sh"
   "bash tests/context-protection.sh"
   "bash tests/element-names-bind.sh"
@@ -66,12 +78,8 @@ suites=(
   "$PHP_RUN $REPO/tests/sso-provider-per-context.php"
   "$PHP_RUN $REPO/tests/unauthorized-names-itself.php"
   "$PHP_RUN $REPO/tests/signing-out-really-signs-out.php"
-  "$PHP_RUN $REPO/tests/login-card-renders.php"
   "$PHP_RUN $REPO/tests/edge-context.php"
-  "python3 tests/bench-scheme-is-declared.py"
-  "python3 tests/bench-zone-contexts-derive.py"
   "python3 tests/widest-group-derives.py"
-  "python3 tests/local-profile-is-inert.py"
   "python3 tests/settings-guard.py"
   "python3 tests/element-body-db-form.py"
   "bash tests/pull-direction.sh"
@@ -86,7 +94,13 @@ suites=(
   "$PHP_RUN $REPO/tests/kuber-google-token.php"
   "bash tests/auth-end-to-end.sh"
   "bash tests/signed-in-bar.sh"
+  "bash tests/jump-slot.sh"
   "bash tests/sso-renew.sh"
+  "bash tests/backchannel-logout.sh"
+  "bash tests/admin-door.sh"
+  "bash tests/estate-brand.sh"
+  "bash tests/unknown-address-refused.sh"
+  "bash tests/ground-is-the-shipped-version.sh"
 )
 # AND THE SUITES OF WHAT AN INSTALL ADDS. A part this repository carries beyond the published
 # enhancement has its suite named in tests/local.list (one command per line, $PHP_RUN and $REPO as
@@ -112,7 +126,7 @@ fi
 # proves that on every run of the bench list), AND names no database, socket, container, docroot
 # or URL in its own text. Several suites pass the first test and fail the second — they use a
 # database or a URL when the ground offers one — and they stay off: estate-clean, settings-guard,
-# actuator-verdicts, storage-identity, login-card-renders, suites-accept-their-ground,
+# actuator-verdicts, storage-identity, suites-accept-their-ground,
 # sso-provider-per-context. A suite is added here only after both are true of it.
 #
 # THE MODE IS STRICT where the bench list is lenient: a suite that REFUSES (exit 2) is red here,
@@ -121,17 +135,18 @@ fi
 # cannot reach it whatever the verb's shell holds. MODX_PHP_RUN is honoured for the php suites, as
 # the bench list honours it, because the PHP that matters is the ground's.
 before_apply=(
+  "$PHP_RUN $REPO/tests/tenant-jumps.php"
   "$PHP_RUN $REPO/tests/actuator-typed.php"
   "$PHP_RUN $REPO/tests/application-badge.php"
   "$PHP_RUN $REPO/tests/context-base.php"
+  "$PHP_RUN $REPO/tests/standing-and-term.php"
   "$PHP_RUN $REPO/tests/diagnostics.php"
   "$PHP_RUN $REPO/tests/edge-context.php"
   "$PHP_RUN $REPO/tests/unauthorized-names-itself.php"
   "$PHP_RUN $REPO/tests/signing-out-really-signs-out.php"
   "$PHP_RUN $REPO/tests/kuber-google-token.php"
-  "python3 tests/bench-scheme-is-declared.py"
+  "$PHP_RUN $REPO/tests/tableRenderer-backlog-record.php"
   "python3 tests/widest-group-derives.py"
-  "python3 tests/local-profile-is-inert.py"
   "python3 tests/element-body-db-form.py"
   "bash tests/pull-direction.sh"
   "bash tests/failures-name-themselves.sh"
@@ -267,6 +282,8 @@ if [ -n "${MODX_PHP_RUN:-}" ]; then
   for s in "${suites[@]}"; do
     case "$s" in
       "bash tests/sso-renew.sh") not_here+=("sso-renew.sh (its stand-in kuber reader is on this machine's loopback; MODx is in a container)") ;;
+      "bash tests/backchannel-logout.sh") not_here+=("backchannel-logout.sh (its stub door keys are on this machine's loopback; MODx is in a container)") ;;
+      "bash tests/admin-door.sh") not_here+=("admin-door.sh (its stub door is on this machine's loopback; MODx is in a container)") ;;
       "bash tests/before-apply-touches-nothing.sh") not_here+=("before-apply-touches-nothing.sh (its sandbox is a user namespace, where the container's PHP cannot be reached through sudo docker; the deploy verb runs --before-apply itself)") ;;
       *) keep+=("$s") ;;
     esac
@@ -274,7 +291,7 @@ if [ -n "${MODX_PHP_RUN:-}" ]; then
   suites=("${keep[@]}")
 fi
 
-ok=0; bad=0; skipped=0; failed_names=(); refused_names=()
+ok=0; bad=0; skipped=0; failed_names=(); refused_names=(); why=()
 for s in "${suites[@]}"; do
   printf '\n=== %s\n' "$s"
   # The docroot travels as an ARGUMENT to every php suite: `docker exec` carries none of this
@@ -300,11 +317,21 @@ for s in "${suites[@]}"; do
     2) skipped=$((skipped+1)); refused_names+=("${s##*/}") ;;
     *) bad=$((bad+1)); failed_names+=("${s##*/}") ;;
   esac
+  # WHY IT WAS RED, kept for the end (2026-11-01). The `last:` above is one line, and a FAIL sits
+  # mid-suite: staging's document-creation suite failed with its FAIL above night-desk's 400-line window
+  # and its last line the "N passed, M failed" count. Each FAIL with its detail line, and each
+  # REFUSING line, is reprinted just before the summary, where the window always reaches.
+  if [ "$rc" != 0 ]; then
+    red=$(printf '%s\n' "$out" | grep -A1 -E '^[[:space:]]*FAIL[[:space:]]|REFUSING' | grep -v '^--$' | head -30 | cut -c1-300)
+    why+=("why ${s##*/} (exit $rc):" "${red:-  (no FAIL or REFUSING line; the last line is above)}")
+  fi
 done
 
+for w in "${why[@]}"; do printf '%s\n' "$w"; done
+
 # THE SUMMARY NAMES THE RED ONES (2026-09-22). The staging ground's journal is read through
-# night-desk q=job, which serves a run's LAST 400 lines, and login-card-renders alone emits ~740
-# lines of Fenom deprecation notices on the container's PHP. So for two nights staging reported
+# night-desk q=job, which serves a run's LAST 400 lines, and one suite (login-card-renders, since
+# removed) emitted ~740 lines of Fenom deprecation notices on the container's PHP. So for two nights staging reported
 # "34 passed, 1 failed" while the one failing suite's own `---` line sat above the window, and
 # nobody without a shell on the ground could say which suite it was. The last line always survives.
 printf '\n%d suite(s) passed, %d failed, %d refused to run\n' "$ok" "$bad" "$skipped"

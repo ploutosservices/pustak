@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """content-vocabulary — the words our MODx gives an author stay words.
 
-docs/content-vocabulary.md is the list. This holds it to two things:
+docs/content-vocabulary.md is the list. This holds it to three things:
   1. every word marked `ours` has its element in common/ — chunks/<word>.html, snippets/<word>.php —
      so renaming or deleting an element a page uses goes red before it deploys;
   2. every tag in the estate's pages is a word in the list, so a page cannot lean on a word nobody
-     promised to keep.
+     promised to keep;
+  3. the estate's Formatting page shows the list as written (tools/vocabulary-page.py --check).
 
     python3 tests/content-vocabulary.py --tree-only    1 only: this checkout, no estate (--before-apply)
     MODX_ESTATE=<modx-estate>/estate.json python3 tests/content-vocabulary.py    1 and 2
@@ -41,8 +42,10 @@ def check(ok, label, detail=''):
             print(f'        {detail}')
 
 
-def vocabulary():
-    rows, seen = {}, False
+def table():
+    """The list's rows in its own order: [{word, kind, whose, parameters, renders}]. The generator of
+    Formatting's section (tools/vocabulary-page.py) reads the list through this, so it is parsed once."""
+    rows, seen = [], False
     for line in (REPO / 'docs' / 'content-vocabulary.md').read_text().splitlines():
         cells = [c.strip() for c in line.strip().strip('|').split('|')] if line.startswith('|') else None
         if not cells:
@@ -55,11 +58,15 @@ def vocabulary():
         if len(cells) != 5 or cells[1] not in KINDS:
             print(f'REFUSED: docs/content-vocabulary.md row is not word | kind | whose | parameters | renders: {line}')
             sys.exit(2)
-        rows[(cells[0], cells[1])] = cells[2]
+        rows.append(dict(zip(('word', 'kind', 'whose', 'parameters', 'renders'), cells)))
     if not rows:
         print('REFUSED: docs/content-vocabulary.md holds no table')
         sys.exit(2)
     return rows
+
+
+def vocabulary():
+    return {(r['word'], r['kind']): r['whose'] for r in table()}
 
 
 def main():
@@ -104,6 +111,12 @@ def main():
                     unknown.setdefault(key, rel)
         check(not unknown, f'every tag in {n} pages is a word in the list',
               '; '.join(f'[[{WRITTEN[k[1]]}{k[0]}]] ({k[1]}) first in {v}' for k, v in sorted(unknown.items())))
+        # 3. the list as Formatting shows it is the list as written here (design-vocabulary-on-formatting.md)
+        page = root / 'seat' / 'documents' / 'platform' / 'formatting-1587.html'
+        gen = subprocess.run([sys.executable, str(REPO / 'tools' / 'vocabulary-page.py'), '--check', str(page)],
+                             capture_output=True, text=True)
+        check(gen.returncode == 0, 'Formatting shows the list as written',
+              (gen.stdout + gen.stderr).strip() + ' — run tools/vocabulary-page.py on the page and commit it')
 
     print(f'\n{passed} passed, {failed} failed')
     return 0 if failed == 0 else 1

@@ -5,8 +5,7 @@ The one file you write is the **estate file** — who your sites serve and on wh
 under `setup/`, `common/` and `tools/` is the software and is not edited.
 
 This sequence was followed end to end on a clean database and docroot, with only an estate file
-copied from `setup/estate.example.json`, and served with `setup/bench-server.php`; the answers it
-gave are the table at the end.
+copied from `setup/estate.example.json`; the answers it gave are the table at the end.
 
 ## What is ours, and what is MODX's
 
@@ -18,8 +17,7 @@ gave are the table at the end.
 
 `index.php` is **not** modified. Stock MODX already reads `config.context.php` for a context key if
 it is present. That file requires `core/components/pustak/lib/EdgeContext.php`, which takes the key
-from the `X-Tenant` request header — set by your web server, or from `BENCH_TENANT` by
-`setup/bench-server.php` on a `php -S` bench — and answers a fixed 404 page for anything else.
+from the `X-Tenant` request header — set by your web server — and answers a fixed 404 page for anything else.
 
 ## Before you start
 
@@ -79,28 +77,24 @@ byte for byte what the package was built from.
 
 03 finds the templates by name and refuses if the package is not installed.
 
-**4. Bind each context to its names, then the system settings.** On a bench:
+**4. Bind each context to its names, then the system settings.** The names are not this
+software's: the installation's `core/config/application.php` carries them (infra renders it on a
+ground; on a dev box the bench's own renderer renders it from infra's derivation), and
+`setup/apply-environment.php` writes them. It runs AFTER 03, which creates each context's settings:
 
-    python3 setup/bench-domains.py --profile local     # php -S port doors (estate domains.bench_ports)
-    python3 setup/bench-domains.py                     # or: <context>.<bench_zone> behind a web server
-
-On a production server, `python3 setup/10-production-domains.py` binds `domains.prod` instead.
-Either way the binding runs AFTER 03, which writes each context's settings, and BEFORE 02, which
-refuses to run until every context has a host:
+    php setup/apply-environment.php
 
     python3 setup/02-system-settings.py
 
 **5. Last.**
 
     php setup/07-regenerate-uris.php                   # LAST — see below
-    python3 setup/config-context.py --profile local --write "$MODX_ROOT"
+    python3 setup/config-context.py --write "$MODX_ROOT"
     php clear-cache.php "$MODX_ROOT"
 
 **6. Serve it.** Behind a web server, send each context's names to the docroot with the header
 `X-Tenant: <context key>` set (and overwritten) by the server, and rewrite friendly URLs to
-`index.php?q=$1`. On a bench, one `php -S` per context:
-
-    BENCH_TENANT=<context> php -S 127.0.0.1:<its bench port> -t "$MODX_ROOT" setup/bench-server.php
+`index.php?q=$1`. A bench is served the same way as every other installation.
 
 Signing in needs an identity provider configured per context — see `docs/modx-sso-design.md`. Until
 it is, `sso-login` answers 200 with a page quoting `SSO-00`, and nobody can sign in.
@@ -139,8 +133,7 @@ For an **open** context, `/home` (and every page under it) answers 200 to anyone
     admin_username              themselves, the people, their groups, and the name of the MODX
                                 manager account the installer created. A protected context names
                                 its `home` (setup/03 creates a page called `home` in every context).
-    domains                     WHICH name each context answers on, per profile (prod / bench), and
-                                the port of each context's `php -S` door (bench_ports).
+    domains                     WHICH name each context answers on, per profile (prod / bench).
 
 `setup/estate.py` loads that file and `setup/domains.py` reads its `domains`; neither is edited.
 

@@ -1,5 +1,5 @@
-<div class="mb-3 fs-4 font-monospace anchor-target border rounded [[+text:default=``]] bg-[[+colour:default=`info`]] text-uppercase balanceCounter"
+<div class="mb-3 fs-4 fw-bold anchor-target border rounded [[+text:default=``]] bg-[[+colour:default=`info`]] sectionCounter"
   style="cursor:pointer" data-bs-toggle="collapse"
-  id="[[+id]]" data-bs-target="#[[+id]]_row" data-nav="[[+nav:default=`[[+title]]`]]">[[+title]] <span class="toggle-text">(Show)</span>
+  id="[[+id]]" data-bs-target="#[[+id]]_row" data-nav="[[+nav:default=`[[+title]]`]]">[[+title]] <span class="toggle-text">[[+open:is=`1`:then=`(Hide)`:else=`(Show)`]]</span>
 </div>
-<div class="row collapse" id="[[+id]]_row">
+<div class="row collapse [[+open:is=`1`:then=`show`:else=``]]" id="[[+id]]_row">

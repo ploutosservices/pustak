@@ -46,7 +46,7 @@ _DEFAULT = {
     'admin_username': None,     # resolved below: MODX's own installer names it, not us
     'users': [],
     'groups': {},
-    'domains': {'contexts': [], 'prod': {}, 'bench_zone': None, 'bench_scheme': 'http'},
+    'domains': {'contexts': []},   # host names are infra's, never the estate's
     'system_settings': {},   # estate-specific MODx system settings, applied by setup/02
     'context_renames': [],   # [[old, new], ...] — keys this estate is moving; see below
     'identifiers': [],       # regexes naming this estate (its addresses, hosts, people): the software
@@ -177,7 +177,7 @@ if _homeless:
 
 # ── The one invariant this loader enforces ───────────────────────────────────────────────
 # A context can be given a domain here and never be declared above. Nothing went red when that
-# happened: `claude` sat in `domains.contexts` and `domains.prod` with no `contexts` entry, so it
+# happened: `claude` sat in `domains.contexts` and the old production name map with no `contexts` entry, so it
 # was never in PROTECTED_CONTEXTS, `04` built it no groups, and it answered 200 with its content to
 # anybody on the internet for as long as the name resolved. The declaration read complete either
 # way, which is what made it survive — the missing key IS the access decision, taken by omission.
@@ -185,7 +185,7 @@ if _homeless:
 # So: publishing a context and declaring one are now the same act. `protected: false` is a perfectly
 # good answer and stays available — it is a decision somebody wrote down and another agent can
 # review. Silence is not.
-_published = set(_E['domains'].get('contexts') or []) | set(_E['domains'].get('prod') or {})
+_published = set(_E['domains'].get('contexts') or [])
 _undeclared = sorted(_published - set(CONTEXTS) - {'web'})
 if _undeclared:
     raise SystemExit(
@@ -271,18 +271,18 @@ CONTEXT_RENAMES = [tuple(pair) for pair in (_E.get('context_renames') or [])]
 # that kind of drift happens.
 DOMAINS = dict(_E['domains'])
 
-# MODx system settings that belong to THIS estate rather than to the software — an address the
-# estate links out to, a per-estate toggle. setup/02 writes the generic list first and then these,
+# MODx system settings that belong to THIS estate rather than to the software — a per-estate
+# toggle, never an address (addresses are infra's, #1463; setup/02 skips one). setup/02 writes the generic list first and then these,
 # so an estate can override a shipped default without the software knowing the estate exists.
 SYSTEM_SETTINGS = dict(_E['system_settings'])
 
 
-# ── Cross-check: every context declared must have a hostname ────────────────────────────────────
-# domains.py is the authority for context -> host and carries a standing assertion against
-# production (verify-domains.py). It legitimately lists MORE contexts than `contexts` — `claude` is
-# added by 11-add-context, not by 01 — so the relationship is containment, not equality. Enforced at
-# import time because the failure it prevents is a context that installs and then resolves nowhere,
-# which looks like a DNS problem for as long as anyone is willing to believe that.
+# ── Cross-check: every context declared is in domains.contexts ──────────────────────────────────
+# domains.contexts is MODx's list door: infra's modx-environment.py names a host for each context in
+# it, so a context missing from it installs and resolves nowhere. It may list MORE contexts than
+# `contexts` — one is added by 11-add-context, not by 01 — so the relationship is containment.
+# Enforced at import time because that failure looks like a DNS problem for as long as anyone is
+# willing to believe that.
 def _check_contexts_have_domains():
     declared = DOMAINS.get('contexts') or []
     if not declared and not CONTEXTS:
@@ -290,9 +290,9 @@ def _check_contexts_have_domains():
     missing = [c for c in CONTEXTS if c not in declared]
     if missing:
         raise SystemExit(
-            f"estate: context(s) {missing} are declared with no hostname. Add them to "
-            f"domains.contexts (and to domains.prod) in {ESTATE_FILE or 'the estate file'}, or "
-            f"they will install and resolve nowhere."
+            f"estate: context(s) {missing} are declared and absent from domains.contexts. Add "
+            f"them there in {ESTATE_FILE or 'the estate file'}, or they will install and resolve "
+            f"nowhere."
         )
 
 

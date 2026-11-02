@@ -2,7 +2,7 @@
 import os
 import re
 import pymysql
-from domains import db_config, BENCH_ZONE
+from domains import db_config
 from estate import SYSTEM_SETTINGS
 
 DB = db_config()
@@ -202,25 +202,13 @@ if ESTATE_ENV == 'development':
 
 # Estate-declared settings land after the shipped ones, so a declaration can override a default.
 #
-# BUT ONLY ON A PRODUCTION-BOUND GROUND (2026-09-14). The estate's system_settings are the
-# links MODx pages point OUT to — kuber.base_url (and, formerly, corp.base_url) — at their PRODUCTION values. Run on
-# staging, this pass would have pointed staging's kuber and corp links at production; infra's dry
-# run caught it before it wrote. Run on the bench the same morning, it did write them. A ground whose
-# contexts answer on the bench zone (*.modx on the internal zone, bench and staging alike) keeps its own outward
-# links, which its restore verb binds; this pass says so and leaves them.
-cur.execute("SELECT value FROM modx_context_setting WHERE `key`='http_host'")
-_hosts = [r[0] for r in cur.fetchall() if r[0]]
-if not _hosts:
-    raise SystemExit("REFUSING: no context http_host rows — cannot tell whether this ground is "
-                     "production, so the estate's outward links are not written anywhere.")
-# The skip covers the `*.base_url` links a ground REBINDS to its own services. Anything else the
-# estate declares — the Privacy Policy address, which is one public page for every ground — applies
-# everywhere.
-_bench_zone = bool(BENCH_ZONE) and any(h.endswith('.' + BENCH_ZONE.lstrip('.')) for h in _hosts)   # the estate's bench zone
-_skipped = sorted(k for k in SYSTEM_SETTINGS if _bench_zone and k.endswith('.base_url'))
-if _skipped:
-    print(f"  skipped estate outward links on a bench-zone ground: {', '.join(_skipped)}")
-settings += [(k, v, 'textfield', 'site') for k, v in SYSTEM_SETTINGS.items() if k not in _skipped]
+# The outward links (kuber, census, whois, the privacy page) are no longer the estate's: infra
+# derives them per ground and setup/apply-environment.php writes them. An address the estate
+# still declares is skipped and named, never written, so a second owner cannot win.
+_links = sorted(k for k, v in SYSTEM_SETTINGS.items() if str(v).startswith(('http://', 'https://')))
+if _links:
+    print(f"  skipped estate address(es), infra's to write: {', '.join(_links)}")
+settings += [(k, v, 'textfield', 'site') for k, v in SYSTEM_SETTINGS.items() if k not in _links]
 
 for key, value, xtype, area in settings:
     cur.execute("SELECT `key` FROM modx_system_settings WHERE `key`=%s", (key,))

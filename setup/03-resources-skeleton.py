@@ -7,7 +7,7 @@ Create three-tree resource skeleton per context:
 """
 import os
 import pymysql, time
-from domains import db_config, BENCH
+from domains import db_config, CONTEXTS
 from estate import CONTEXTS as _SPEC
 
 DB = db_config()
@@ -49,11 +49,11 @@ def make_resource(context_key, pagetitle, alias, parent, template, published, me
     print(f'  created: [{context_key}] {alias} (id={rid})')
     return rid
 
-# The estate's contexts, their names and their bench hosts — read from the estate file, never typed
-# here (the three this listed were the keys before the estate renamed them).
-contexts = [c for c in BENCH if c in _SPEC]
+# The estate's contexts and their names — read from the estate file, never typed here. Their
+# http_host and site_url are infra's: setup/apply-environment.php writes them after this.
+contexts = [c for c in CONTEXTS if c in _SPEC]
 if not contexts:
-    raise SystemExit("REFUSING: the estate declares no context with a bench host (domains.bench_zone + contexts)")
+    raise SystemExit("REFUSING: the estate declares no context (domains.contexts + contexts)")
 ids = {}   # ids[context][alias] = resource_id
 
 for ctx in contexts:
@@ -65,7 +65,11 @@ for ctx in contexts:
 
     ids[ctx]['login']        = make_resource(ctx, 'Login',        'login',        sup, TMPL_PUBLIC, 1, 0)
     ids[ctx]['logout']       = make_resource(ctx, 'Logout',       'logout',       sup, TMPL_PUBLIC, 1, 0)
-    ids[ctx]['search']       = make_resource(ctx, 'Search',       'search',       sup, TMPL_FULL,   1, 0)
+    # The same calls every context's Search page carries (tests/simplesearch-untouched.sh); empty, a
+    # new context's search box led to a page with nothing behind it (help, 2026-10-31).
+    ids[ctx]['search']       = make_resource(ctx, 'Search',       'search',       sup, TMPL_FULL,   1, 0,
+                                             content='[[!SimpleSearchForm  ]]\n \n<h2>Results</h2>\n'
+                                                     '[[!SimpleSearch? &showExtract=`0` &tpl=`Bootstrap.5.SearchResult`]]\n')
     ids[ctx]['unauthorized'] = make_resource(ctx, 'Unauthorized', 'unauthorized', sup, TMPL_PUBLIC, 1, 0)
     ids[ctx]['error']        = make_resource(ctx, 'Error',        'error',        sup, TMPL_PUBLIC, 1, 0)
     ids[ctx]['unavailable']  = make_resource(ctx, 'Unavailable',  'unavailable',  sup, TMPL_PUBLIC, 1, 0)
@@ -114,15 +118,12 @@ def set_ctx(context_key, key, value):
             (context_key, key, value)
         )
 
-hosts = {c: BENCH[c][0] for c in contexts}
 names = {c: _SPEC[c].get('site_name') or c for c in contexts}
 
 for ctx in contexts:
     i = ids[ctx]
     set_ctx(ctx, 'site_name',          names[ctx])
-    set_ctx(ctx, 'http_host',          hosts[ctx])
     set_ctx(ctx, 'base_url',           '/')
-    set_ctx(ctx, 'site_url',           f'http://{hosts[ctx]}/')
     set_ctx(ctx, 'site_start',         str(i['userHome']))
     set_ctx(ctx, 'error_page',         str(i['error']))
     set_ctx(ctx, 'unauthorized_page',  str(i['unauthorized']))

@@ -1,0 +1,43 @@
+/**
+ * estateBrand — this context's name and logo for the sign-in door, at /.well-known/estate-brand.json.
+ * Event: OnPageNotFound.
+ *
+ * WHY. The door's page names the tenant a person is signing in to, and asks the application for that
+ * tenant's name and logo: fetch(<origin>/.well-known/estate-brand.json, {mode: "cors", credentials:
+ * "omit"}), reading `name` and `logo` (resolved against the origin). The application owns them; the
+ * door holds no copy. The owner, 2026-10-23: "also serve that json if you support it". Design: claude-shared
+ * design/estate-brand-skunkworks.md.
+ *
+ * WHAT IT SENDS. The current context's own settings, nothing stored anew:
+ *   name  = site_name   (an empty one answers 404, so the door keeps its own label, never an empty one)
+ *   logo  = site_logo   (only where set; without it the door keeps its mark)
+ * with Access-Control-Allow-Origin: * — the door calls cross-origin with no credentials, and the file
+ * holds nothing private.
+ *
+ * WHY THIS EVENT. No resource holds the path, so MODx raises OnPageNotFound for it in every context,
+ * signed in or not — a documented event, as the owner ruled for every MODx enhancement (2026-10-23). Any
+ * other path: nothing happens and MODx's own 404 stands.
+ */
+
+$path = (string) parse_url((string) ($_SERVER['REQUEST_URI'] ?? ''), PHP_URL_PATH);
+if ($path !== '/.well-known/estate-brand.json') {
+    return;
+}
+$name = trim((string) $modx->getOption('site_name'));
+if ($name === '') {
+    return;
+}
+$brand = ['name' => $name];
+$logo = trim((string) $modx->getOption('site_logo'));
+if ($logo !== '') {
+    $brand['logo'] = $logo;
+}
+while (ob_get_level()) {
+    ob_end_clean();
+}
+http_response_code(200);
+header('Content-Type: application/json; charset=utf-8');
+header('Access-Control-Allow-Origin: *');
+header('Cache-Control: public, max-age=300');
+echo json_encode($brand, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+exit;

@@ -1,23 +1,22 @@
 /**
- * GoogleSSOStart — begin the Google OAuth 2.0 (OpenID Connect) login.
+ * GoogleSSOStart — begin the sign-in at the estate's door (Chowkidar). The name is historical: a
+ * renamed element deploys as a NEW one, so it keeps its name (design
+ * chowkidar-step4-skunkworks-apps.md §2).
  *
  * Placed on each context's login / unauthorized page (replaces the [[!Login]] form for SSO).
- * An anonymous user first sees a branded per-tenant sign-in screen (the Bootstrap.5.googleLogin
- * chunk, rendered through pdoTools/Fenom); its button re-enters this snippet with `?sso=go`, which
- * is when the OAuth redirect to Google actually fires. On return, GoogleSSOCallback (on the callback
- * resource) completes the login. The button step (vs a silent auto-redirect) is what
- * gives each context a visible, brandable login page and avoids bouncing straight off-site.
+ * Every arrival goes straight to the door: one sign-in screen and one signed-out screen, both
+ * the door's. A sign-out returns here with `?reason=signed_out`, passed on to the door.
+ * On return, GoogleSSOCallback (on the callback resource) completes the login.
  *
- * Authorization-code flow (server-side): response_type=code, the code is exchanged for an
- * id_token in the callback over TLS directly against Google's token endpoint. The redirect_uri
- * is the PUBLIC https edge for this context (infra terminates TLS); it MUST byte-match a URI
- * registered on the shared Google OAuth client — Google rejects any other.
+ * Authorization-code flow with PKCE (S256), server-side: the code and its verifier are exchanged
+ * for tokens in the callback, directly against the door's token endpoint. The redirect_uri MUST
+ * byte-match a return address declared on this context's door client.
  *
- * Config (system settings, namespace `sso`, set by setup/12-sso.py):
- *   sso.google_client_id      — the shared project_sso web client id
+ * Config (context settings `sso.oidc_*`, set by setup/12-sso.py or infra's render; SsoConfig).
  *
  * No user input is trusted here except returnUrl, which is stored server-side (session) and only
- * ever used as a same-site path by the callback — never reflected.
+ * ever used as a same-site path by the callback — never reflected — and reason, which travels only
+ * when it is one of the door's fixed codes.
  */
 
 // Already signed in? Don't re-run OAuth — go straight to the home router. This guards against a
@@ -37,11 +36,9 @@ if ($current && (int) $current->get('id') > 0 && $current->isAuthenticated($ctxK
     return '';
 }
 
-// WHICH PROVIDER THIS CONTEXT USES. Google for public names, the estate's OIDC provider for
-// internal-zone names — the owner's rule, and not a preference: Google will not accept a redirect URI on a
-// name it cannot resolve publicly, so an internal-zone context cannot complete a Google sign-in at all.
-// One resolver, shared with GoogleSSOCallback, because the provider and client id chosen here and
-// there must be identical or the token exchange fails with a mismatch and no useful message.
+// THIS CONTEXT'S CLIENT AT THE DOOR. One resolver, shared with GoogleSSOCallback, because the
+// client id chosen here and there must be identical or the token exchange fails with a mismatch
+// and no useful message.
 require_once rtrim(MODX_CORE_PATH, '/') . '/components/pustak/lib/SsoConfig.php';
 $sso = SsoConfig::forContext($modx);
 if ($sso->fault !== '') {
@@ -64,60 +61,16 @@ if (!empty($_REQUEST['returnUrl'])) {
     }
 }
 
-// Branded sign-in screen: unless the user has clicked through (`?sso=go`), render the per-tenant
-// login card and stop here. Its button links back with sso=go (+ the same-site returnUrl), so the
-// OAuth redirect below only fires on that explicit click — the login page is visible and brandable
-// rather than an instant off-site bounce.
-if (($_GET['sso'] ?? '') !== 'go') {
-    $args = ['sso' => 'go'];
-    if ($returnUrl !== '') {
-        $args['returnUrl'] = $returnUrl;
-    }
-    $startUrl = $modx->makeUrl((int) $modx->resource->get('id'), '', $args, 'full');
-    /** @var \ModxPro\PdoTools\CoreTools $pdo */
-    $pdo = $modx->services->get(\ModxPro\PdoTools\CoreTools::class);
-    // A MANAGER SESSION IS THE ONE THING THAT MAKES 'SIGNED OUT' UNTRUE, so the sign-out sends
-    // ?mgr=open and this page says it. Without it the reader signs out, still sees signed-in
-    // pages, and has no way to know why — which is what the owner met. The notice is passed to
-    // the chunk; a chunk that does not use the placeholder renders exactly as it did.
-    $mgrNotice = '';
-    if (($_GET['mgr'] ?? '') === 'open') {
-        $mgrNotice = 'You are signed out of this site. Your MANAGER session is still open, which '
-                   . 'is why some pages may still recognise you — sign out of the manager as well '
-                   . 'to be fully signed out.';
-    }
-    // THE BUTTON MUST NAME THE PROVIDER IT ACTUALLY GOES TO. It said "Sign in with Google" on
-    // every context, including the ones SsoConfig points at the estate OIDC provider — so on a bench or
-    // an internal-zone context the button promised Google and went somewhere else, and when that somewhere
-    // else was unreachable the failure read as "Google is down". The owner, 2026-08-20, on the local
-    // instance: "when i click on google, it says cannot connect." It was never going to Google.
-    //
-    // Resolved from the SAME $sso the redirect uses, so the label cannot disagree with the
-    // destination — the two are one fact. Google keeps its icon and its wording; anything else
-    // says "estate sign-in", because a mock and a real estate provider are the same door to the
-    // person clicking it and naming the vendor would be the same defect one layer down.
-    $isGoogle = ($sso->provider === 'google');
-    // THE SIGN-IN CARD WEARS THE COMPANY'S OWN LOGO, THE BIRD WHERE IT HAS NONE (the
-    // owner, 2026-10-07: "top left and tab icon to be veena and sign-in to show company logo",
-    // "each company's own logo", "if empty, then bird"). `site_logo` is written by setup/04 from the
-    // estate's `logo` declaration. Only an https URL is used — anything else in the row is ignored
-    // rather than rendered into an <img> on a page anyone can load. The bar and the tab stay the veena.
-    $logo = trim((string) $modx->getOption('site_logo'));
-    if (strpos($logo, 'https://') !== 0) {
-        $logo = rtrim((string) $modx->getOption('estate_cdn_url'), '/') . '/brand/20260730/favicon.svg';
-    }
-    // A privacy link only where one is configured: `privacy_url`, a system or context setting. The
-    // estate has no MODx privacy policy page, and a link to nothing is worse than no link.
-    $privacy = trim((string) $modx->getOption('privacy_url'));
-    return $pdo->getChunk('Bootstrap.5.googleLogin', [
-        'site_name' => (string) $modx->getOption('site_name'),
-        'startUrl'  => $startUrl,
-        'notice'    => $mgrNotice,
-        'logo'      => $logo,
-        'privacy'   => (strpos($privacy, 'https://') === 0 || strpos($privacy, '/') === 0) ? $privacy : '',
-        'btn_label' => $isGoogle ? 'Continue with Google' : 'Estate sign-in',
-        'btn_icon'  => $isGoogle ? 'bi-google' : 'bi-box-arrow-in-right',
-    ]);
+// ONE SIGN-IN SCREEN, THE DOOR'S, AND ONE SIGNED-OUT SCREEN, THE DOOR'S TOO
+// (claude/shared/design/door-standard-login.md §2). Every arrival goes straight to the door with no
+// `prompt` and no `kc_idp_hint`: a reader the door knows comes back signed in having seen nothing,
+// anyone else sees the door's own page. MODx draws no sign-in or signed-out screen of its own. A
+// sign-out comes back here as ?reason=signed_out, and the reason travels on to the door as
+// chowkidar_reason, so the door heads its page with its own words. Only a code on the door's fixed
+// list travels; the door shows nothing for any other, and MODx sends no text of its own.
+$reason = (string) ($_GET['reason'] ?? '');
+if (!in_array($reason, ['signed_out', 'certificate_needed', 'session_expired', 'sign_in_again'], true)) {
+    $reason = '';
 }
 
 $modx->startSession();
@@ -137,6 +90,9 @@ $modx->startSession();
 // seconds), and no more than ten are kept, oldest first out.
 $state = bin2hex(random_bytes(16));
 $nonce = bin2hex(random_bytes(16));
+// PKCE (RFC 7636, S256), the door's contract (chowkidar-2030 §2.1): the verifier stays in this
+// session beside its state, and only its hash leaves with the browser.
+$verifier = rtrim(strtr(base64_encode(random_bytes(48)), '+/', '-_'), '=');
 $pending = is_array($_SESSION['sso.pending'] ?? null) ? $_SESSION['sso.pending'] : [];
 $now = time();
 $pending = array_filter($pending, function ($p) use ($now) {
@@ -144,6 +100,7 @@ $pending = array_filter($pending, function ($p) use ($now) {
 });
 $pending[$state] = [
     'nonce'     => $nonce,
+    'verifier'  => $verifier,
     'returnUrl' => $returnUrl,
     'ctx'       => $modx->context->get('key'),
     'at'        => $now,
@@ -164,23 +121,13 @@ $params = [
     'scope'         => 'openid email profile',
     'state'         => $state,
     'nonce'         => $nonce,
+    'code_challenge'        => rtrim(strtr(base64_encode(hash('sha256', $verifier, true)), '+/', '-_'), '='),
+    'code_challenge_method' => 'S256',
 ];
-// `access_type` and `prompt` are GOOGLE parameters. A conforming provider is
-// entitled to reject a parameter it does not know, and the estate's IdP has no account chooser to
-// scope, so they are sent only down the Google path.
-// OFFLINE, SO THE TOKEN CAN BE RENEWED. Google's id_token lives an hour and the bookkeeping-names plugin ends
-// the session the moment it is stale, so a reader was signed out every hour (the owner, 2026-10-05).
-// access_type=offline makes the code exchange carry a refresh_token, which the ssoRenew plugin
-// trades for a new id_token before the old one runs out. `consent` is what makes Google hand the
-// refresh_token on EVERY sign-in, not only the first one this client ever saw; without it a
-// returning reader gets none and is back to the hourly sign-out.
-if ($sso->provider === 'google') {
-    $params['access_type'] = 'offline';
-    $params['prompt']      = 'select_account consent';
+if ($reason !== '') {
+    $params['chowkidar_reason'] = $reason;
 }
 
-// The authorization endpoint comes from the resolved provider: Google's, the bench's
-// mock-oidc, or the estate's OIDC provider for an internal-zone context. The guard that decides which is
-// permitted lives in SsoConfig and is the zone suffix, not a hostname.
+// The authorization endpoint is this context's door realm's (SsoConfig).
 $modx->sendRedirect($sso->authEndpoint . '?' . http_build_query($params));
 return '';

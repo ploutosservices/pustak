@@ -76,7 +76,7 @@ $refuse = function (string $ref, string $logMsg, string $headline, string $body)
          . '<div class="card border shadow-sm rounded-3" style="max-width:24rem;width:100%;">'
          . '<div class="card-body text-center p-4 p-sm-5">'
          . '<img src="' . htmlspecialchars(rtrim((string) $modx->getOption('estate_cdn_url'), '/'), ENT_QUOTES, 'UTF-8')
-         . '/brand/20261007-veena/favicon.svg" alt="" height="64" class="mb-3"'
+         . '/brand/20261007-veena/veena.svg" alt="" height="64" class="mb-3"'
          . ' style="max-width:10rem;object-fit:contain;">'
          . '<h1 class="h5 fw-semibold mb-1">' . $app . '</h1>'
          . '<p class="mb-4">' . $site . '</p>'

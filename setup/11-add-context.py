@@ -7,14 +7,14 @@ the bench; infra runs the prod-side DNS/vhost + this script on the container).
 
 ROUTING (2026-09-15): name->context is the EDGE's, not this script's. `config.context.php`
 is one line requiring EdgeContext.php, which takes the context from the X-Tenant header nginx sets
-from the name's `upstream_key` (a bench port door: BENCH_TENANT). A fresh context serves once the
+from the name's tenant (config scripts/tenants.yaml). A fresh context serves once the
 edge sends its key; until then its names answer the estate's 404. This script writes the DB rows
 only: context + settings + startup doc + uri + anon access. (It used to patch a host map into
 config.context.php under PATCH_CONFIG_CONTEXT=1; there is no map any more.)
 
-The context to add and its bench host come from CTX_KEY / CTX_HOST; neither has a default.
-Override CTX_* in the env to add a different one. Bench host is *.modx on the internal zone; prod host is bound
-by setup/10-production-domains.py + infra's config.context.php template (add the context there too).
+The context to add and its host come from CTX_KEY / CTX_HOST; neither has a default. The host is the
+caller's, from infra's derivation, and setup/apply-environment.php rewrites http_host and
+site_url from the installation's application.php after this.
 
 ACCESS MODEL — declared, not assumed. A context whose estate entry says `protected: true`
 is built in the PROTECTED shape: `site_start` is its `userHome` (so an anonymous hit on the context
@@ -37,7 +37,7 @@ import os
 import sys, re, time, pymysql
 from domains import db_config
 import settings_guard
-from estate import PROTECTED_CONTEXTS   # whether THIS context is gated is declared, not passed in
+from estate import PROTECTED_CONTEXTS, CONTEXTS as CONTEXT_SPEC   # whether THIS context is gated is declared, not passed in
 
 DB = db_config()
 
@@ -51,10 +51,16 @@ def _required(name, why):
 
 
 CTX_KEY  = _required('CTX_KEY', 'the context to add has no default')
-CTX_NAME = os.environ.get('CTX_NAME', 'Claude')
-CTX_DESC = os.environ.get('CTX_DESC', 'Internal agent-documentation context')
-CTX_HOST = _required('CTX_HOST', 'the bench host has no default')          # bench host; prod host via setup/10
-CTX_SITENAME = os.environ.get('CTX_SITENAME', 'Claude')
+# WHAT the context is comes from the estate, never from a default: a context the estate does not
+# declare is refused, so a production run can only create a context somebody declared and reviewed.
+# The environment may still override a name for a one-off bench run.
+_SPEC = CONTEXT_SPEC.get(CTX_KEY) or sys.exit(
+    f'REFUSING: context {CTX_KEY!r} is not declared in the estate (MODX_ESTATE). Declare it in '
+    f'estate.json first. Nothing written.')
+CTX_NAME = os.environ.get('CTX_NAME') or _SPEC.get('name') or CTX_KEY
+CTX_DESC = os.environ.get('CTX_DESC') or _SPEC.get('description', '')
+CTX_HOST = _required('CTX_HOST', 'the host has no default')          # infra's; apply-environment.php rewrites it
+CTX_SITENAME = os.environ.get('CTX_SITENAME') or _SPEC.get('site_name') or CTX_NAME
 TEMPLATE_NAME = os.environ.get('CTX_TEMPLATE', 'page.public')      # a template NAME (clean, no nav dep); ids differ per database
 # No default: /srv/local/modx was the dev bench and it stopped existing when the bench
 # became staging (2026-08-14). A guessed docroot addresses a MODx nobody runs.
@@ -248,6 +254,14 @@ else:
     settings['unauthorized_page'] = str(sup['unauthorized'])
     settings['login_page'] = str(sup['login'])
     settings['logout_page'] = str(sup['logout'])
+# Folder URLs (<context>/<folder>/<page>) when the estate declares them for this context; MODx reads
+# use_alias_path per context (modResource::getAliasPath asks the page's own context).
+if 'use_alias_path' in (CONTEXT_SPEC.get(CTX_KEY) or {}):
+    settings['use_alias_path'] = '1' if CONTEXT_SPEC[CTX_KEY]['use_alias_path'] is True else '0'
+# The sign-in door's logo for this context (estateBrand serves it). On a protected context 04 also
+# converges it; an open context has only this pass.
+if (CONTEXT_SPEC.get(CTX_KEY) or {}).get('logo', '').startswith('https://'):
+    settings['site_logo'] = CONTEXT_SPEC[CTX_KEY]['logo']
 for k, v in settings.items():
     if one("SELECT 1 FROM modx_context_setting WHERE context_key=%s AND `key`=%s", (CTX_KEY, k)):
         cur.execute("UPDATE modx_context_setting SET value=%s WHERE context_key=%s AND `key`=%s", (v, CTX_KEY, k))
@@ -267,6 +281,6 @@ else:
 g.commit(); cur.close(); conn.close()
 
 # 5) routing is the edge's: nothing to write in the docroot.
-print(f"  routing: the edge must send X-Tenant: {CTX_KEY} for this context's names (nginx upstream_key, or BENCH_TENANT on a port door).")
+print(f"  routing: the edge must send X-Tenant: {CTX_KEY} for this context's names (nginx, from config scripts/tenants.yaml).")
 
 print("add-context complete. Clear the MODx cache next.")

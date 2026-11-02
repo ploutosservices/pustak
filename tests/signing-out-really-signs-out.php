@@ -12,9 +12,8 @@
  * which tableRenderer's `&auth` asserts to kuber, and `sso.id_token`, which the bookkeeping-names
  * plugin presents. Signing out left an identity behind that this estate would still vouch for.
  *
- * THE MANAGER HALF. A manager session lives in the `mgr` context and the sign-out ends one
- * context, the web one. That is deliberate — ending `mgr` would log him out of the manager
- * mid-edit — but nothing said so, so the site simply kept recognising him.
+ * THE MANAGER HALF. Since 2026-10-24 the sign-out ends the manager too (the owner: "either sign me
+ * out or show me the button to sign out. you leave me hanging"); before, it was left open.
  *
  * WHY THIS SUITE IS STATIC. Both halves are session behaviour inside a running MODx, and asserting
  * them for real needs a browser, a manager login and a Google sign-in. What can be asserted here
@@ -41,9 +40,8 @@ $code = function (string $rel) use ($root): string {
 
 $logout = $code('common/snippets/GoogleSSOLogout.php');
 $start  = $code('common/snippets/GoogleSSOStart.php');
-$chunk  = file_get_contents($root . '/common/chunks/Bootstrap.5.googleLogin.html');
 
-echo "signing-out-really-signs-out — the sign-out ends the identity, and names what it cannot end\n\n";
+echo "signing-out-really-signs-out — the sign-out ends the identity, and ends at the door\n\n";
 
 // ── 1. the identity this site issued is dropped ────────────────────────────────────────────────
 foreach (['sso.verified_email', 'sso.id_token', 'sso.id_token_exp'] as $key) {
@@ -52,36 +50,36 @@ foreach (['sso.verified_email', 'sso.id_token', 'sso.id_token_exp'] as $key) {
           "it survives a sign-out, and downstream still vouches for the reader with it");
 }
 
-// ── 2. and it does NOT end the manager session ─────────────────────────────────────────────────
-// The one thing this fix must not do. A sign-out that logs him out of the manager mid-edit is a
-// worse defect than the one being fixed, so the absence is asserted as deliberately as the
-// presence.
-check(!preg_match("#removeSessionContext\(\s*['\"]mgr['\"]#", $logout),
-      "and it does NOT end the manager session — that would log him out mid-edit",
-      'the manager session is ended somewhere in the sign-out');
-check(strpos($logout, "isAuthenticated('mgr')") !== false,
-      '  but it NOTICES one, so the reader can be told',
-      'without this the sign-out cannot say why the site still knows them');
+// ── 2. and it ENDS the manager session too ─────────────────────────────────────────────────────
+// The owner, 2026-10-24: "either sign me out or show me the button to sign out. you leave me
+// hanging." Shared session (production): ended here through the manager's own logout events.
+// Separate sessions: the browser is sent through the manager first (adminDoor ?pustak-signout).
+check(preg_match("#removeSessionContext\\(\\s*['\"]mgr['\"]#", $logout) === 1,
+      'it ends a manager session that shares the site session', 'a manager session survives the sign-out');
+check(strpos($logout, "invokeEvent('OnBeforeManagerLogout'") !== false && strpos($logout, "invokeEvent('OnManagerLogout'") !== false,
+      "  through the manager's own logout events");
+check(strpos($logout, "pustak-signout") !== false,
+      '  and sends the browser through the manager first when its session is a separate cookie');
+check(strpos($logout, "isAuthenticated('mgr')") !== false && strpos($logout, 'LOG_LEVEL_WARN') !== false,
+      '  and logs one that did not end');
 
-// ── 3. the reader is told, on the page they land on ────────────────────────────────────────────
-check(strpos($logout, "mgr=open") !== false,
-      'the sign-out carries the fact to the page it redirects to');
-check(strpos($start, "'mgr'") !== false && strpos($start, "notice") !== false,
-      'the sign-in page turns it into a sentence');
-check(strpos($chunk, '$notice') !== false,
-      'and the card renders that sentence');
-
-// ── 4. the control: a notice must not appear on an ordinary visit ──────────────────────────────
-// Without this, every check above would pass on a page that shouts at every visitor.
-check((bool) preg_match('#\{if \$notice\?\}#', $chunk),
-      'the notice is conditional — an ordinary sign-in page carries none',
-      'a card that always shows it trains the reader to ignore it');
+// ── 3. the way back is the door's sign-in page (#1428; door-standard-login.md §2) ──────────────
+// MODx draws no signed-out screen of its own: the door returns the browser to the sign-in entry with
+// reason=signed_out, and the entry forwards it as chowkidar_reason so the door says it.
+check(strpos($logout, "'post_logout_redirect_uri'") !== false && strpos($logout, 'reason=signed_out') !== false,
+      'the sign-out names the way back: the sign-in entry with reason=signed_out');
+check(strpos($start, "'chowkidar_reason'") !== false,
+      'the sign-in entry passes the reason on to the door');
+check(strpos($start, 'kc_idp_hint') === false,
+      '  and never pre-selects a provider, which would sign the person straight back in');
+check(strpos($start, 'getChunk(') === false && strpos($logout, 'sso=out') === false,
+      'no signed-out card of MODx\'s own is drawn or asked for');
 
 // ── 5. the sign-in page must not bounce a merely-KNOWN user ────────────────────────────────────
 // The owner, testing this on production: 'with manager open, when i sign out, i go to home'. The
 // sign-out was correct; GoogleSSOStart's loop guard was not. It redirected anyone getUser()
 // returned — and a manager session returns him — so the page he was sent to forwarded him onward
-// before it could render the notice. The guard has to ask whether the visitor is authenticated in
+// before it could render what it had to say. The guard has to ask whether the visitor is authenticated in
 // THIS context, which is exactly what the sign-out just undid.
 $start = $code('common/snippets/GoogleSSOStart.php');
 check(strpos($start, 'isAuthenticated(') !== false,

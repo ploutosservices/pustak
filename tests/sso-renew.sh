@@ -7,7 +7,7 @@
 # The owner, 2026-10-05, signed out mid-visit and then shown blank cells with nothing in the log:
 # "when you get nothing from Kuber, can you indicate it somehow, should google token be renewed on
 # each page load, preferably in background." Both answers live on the SIGNED-IN surface, so this
-# signs in for real through the bench's mock-oidc and reads the server-side session row.
+# signs in for real at the door and reads the server-side session row.
 #
 #   renewal    a token near expiry is traded for a new one of the SAME reader on the next page;
 #              with ssoRenew disabled the same state is NOT renewed (the control: the check can fail);
@@ -17,8 +17,8 @@
 #              a reader that answers 500 puts the dash in both, titled with the status.
 #
 # BENCH ONLY, and not in a container: the stand-in reader listens on this machine's loopback, which
-# is a different loopback from a containerised MODx's. It signs in as a real person without their
-# password, which is only possible because the bench's provider is mock-oidc.
+# is a different loopback from a containerised MODx's. It signs in as the suites' machine identity
+# at the door's non-production realm.
 set -uo pipefail
 
 HOST=${MODX_TEST_HOST:-}   # empty: the context's live http_host, read after lib.sh
@@ -35,7 +35,7 @@ DOOR=$(host_door "$HOST") || exit 2
 
 require_repo
 require_bench
-require_mock_idp
+require_nonprod_door
 if [ -n "${MODX_PHP_RUN:-}" ]; then
   echo "REFUSING TO RUN: MODx runs in a container on this ground (MODX_PHP_RUN is set), so the" >&2
   echo "                 stand-in kuber reader on this machine's loopback is not MODx's loopback." >&2
@@ -44,9 +44,8 @@ fi
 
 echo "the reader stays signed in, and a missing name is marked"
 
-reader=$(q "SELECT p.email FROM modx_user_attributes p JOIN modx_users u ON u.id=p.internalKey
-            WHERE u.active=1 AND p.email LIKE '%@%' ORDER BY u.id LIMIT 1;")
-[ -z "$reader" ] && { echo "REFUSING TO RUN: no active user with an email on this bench." >&2; exit 2; }
+reader=$(drill_reader)   # a machine identity, never a person
+[ -z "$reader" ] && { echo "REFUSING TO RUN: drill_reader could not seat the suites' machine identity on this ground." >&2; exit 2; }
 plugin=$(q "SELECT COUNT(*) FROM modx_site_plugins p JOIN modx_site_plugin_events e ON e.pluginid=p.id
             WHERE p.name='ssoRenew' AND p.disabled=0 AND e.event='OnWebPageInit';")
 [ "$plugin" = 1 ] || { echo "REFUSING TO RUN: ssoRenew is not installed and bound to OnWebPageInit on this bench." >&2; exit 2; }
@@ -59,7 +58,9 @@ cleanup() {
   q "DELETE FROM modx_site_content WHERE context_key='$CTX' AND alias='$ALIAS';" >/dev/null 2>&1
   q "UPDATE modx_system_settings SET value='$was_url' WHERE \`key\`='kuber.reader_url';" >/dev/null 2>&1
   q "UPDATE modx_site_plugins SET disabled=0 WHERE name='ssoRenew';" >/dev/null 2>&1
-  [ -n "${listener:-}" ] && kill "$listener" 2>/dev/null
+  # local_php is a function, so `local_php -S … &` is a subshell and $! is ITS pid: kill the php under
+  # it first, or the server outlives the run (136 of them were found in /tmp on 2026-10-12).
+  [ -n "${listener:-}" ] && { pkill -P "$listener" 2>/dev/null; kill "$listener" 2>/dev/null; }
   modx_php "$REPO/clear-cache.php" "$MODX_ROOT" >/dev/null 2>&1 || true
   rm -rf "$tmp"
 }
@@ -105,6 +106,7 @@ port=$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); pr
 cat > "$tmp/reader.php" <<'PHP'
 <?php
 $mode = trim((string) @file_get_contents(getenv('READER_MODE')));
+file_put_contents(getenv('READER_MODE') . '.auth', ($_SERVER['HTTP_AUTHORIZATION'] ?? '') . "\n", FILE_APPEND);
 header('Content-Type: application/json');
 if ($mode === '500') { http_response_code(500); echo '{"error":"down"}'; return; }
 echo json_encode(['1' => 'Name One']);
@@ -129,13 +131,9 @@ PAGE="$SCHEME://$DOOR/$ALIAS"
 jar="$tmp/cookies"
 C=(curl -sS --resolve "${DOOR%%:*}:$PORT:$IP" -b "$jar" -c "$jar" -m 15)
 
-# --- sign in for real through the bench's mock provider ----------------------------------------
+# --- sign in for real at the door --------------------------------------------------------------
 loc=$("${C[@]}" -o /dev/null -w '%{redirect_url}' "$SCHEME://$DOOR/sso-login?sso=go")
-form=$("${C[@]}" "$loc")
-qval=$(printf '%s' "$form" | grep -o 'name="q" value="[^"]*"' | head -1 | sed 's/.*value="//; s/"$//')
-qval=${qval//&amp;/&}
-cb=$("${C[@]}" -o /dev/null -w '%{redirect_url}' -X POST \
-     --data-urlencode "q=$qval" --data-urlencode "email=$reader" "${loc%%\?*}")
+cb=$(idp_sign_in "$loc" "$reader")   # the door's form, by password (lib.sh)
 "${C[@]}" -o /dev/null "$cb"
 sid=$(awk '/PHPSESSID/ {print $7}' "$jar" | tail -1)
 check "$([ -n "$(sess get sso.verified_email)" ] && echo 1 || echo 0)" "signed in on the bench as $reader" "session $sid"
@@ -180,6 +178,13 @@ check "$(has "$out" "kuberid=\"2\"><span class=\"kuber-unnamed\" title=\"No name
 check "$(has "$(tail -n +"$((lines0 + 1))" "$LOG" 2>/dev/null)" "kuber gave no name for 2")" \
       "and the log names the id, at a level production keeps" "no 'kuber gave no name for 2' in $LOG"
 check "$(hasnt "$out" 'kuberid="1"><span class="kuber-unnamed"')" "a drawn name carries no dash" ""
+# What reached the reader: the reader's door token EXCHANGED for kuber, asked for by
+# this context's own door client — never the reader's own id_token (aud = the context's client).
+claims=$(tail -1 "$tmp/mode.auth" | sed 's/^Bearer //' | cut -d. -f2 | python3 -c 'import sys,base64,json; p=sys.stdin.read().strip(); c=json.loads(base64.urlsafe_b64decode(p+"="*(-len(p)%4))); print(c.get("aud"), c.get("azp"), c.get("typ"))' 2>/dev/null)
+read -r aud azp typ <<<"$claims"
+client=$(q "SELECT value FROM modx_context_setting WHERE context_key='$CTX' AND \`key\`='sso.oidc_client_id';")
+check "$([ "$aud" = kuber ] && [ "$typ" = Bearer ] && [ -n "$client" ] && [ "$azp" = "$client" ] && echo 1 || echo 0)" \
+      "kuber is sent the reader's token exchanged for kuber, by this context's client" "aud '$aud' azp '$azp' typ '$typ', client '$client'"
 
 echo 500 > "$tmp/mode"
 out=$("${C[@]}" "$PAGE")

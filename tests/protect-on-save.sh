@@ -327,19 +327,39 @@ clear_cache
 # and 2 below leave behind.
 #
 # THE GUARD IS A PROPERTY OF THE DATA, NOT A VARIABLE SOMEBODY REMEMBERS. A bench has had its
-# context hostnames normalised to the bench zone by setup/bench-domains.py — that is what makes it a
-# bench, it is the step the restore verb runs every time, and no production or staging ground has it.
+# context hostnames set to this box's own bench names, which infra's modx-environment.py derives for
+# this machine (the bench renderer's --names) — the restore verb writes them every time,
+# and no production or staging ground holds them.
 # A flag like MAY_BREAK=1 would be forgotten in exactly the case that matters.
 hosts=$(q "SELECT value FROM modx_context_setting WHERE \`key\`='http_host';")
-bench_zone=$(python3 "$REPO/setup/estate-get.py" domains.bench_zone) || bench_zone='(none declared)'
-notbench=$(printf '%s\n' "$hosts" | grep -v "\\.${bench_zone//./\\.}\$" | grep -c . || true)
+bench_names=$(python3 "$REPO/setup/bench-application.py" --names) || bench_names=''
+notbench=$( { printf '%s\n' "$hosts" | grep -vxF "${bench_names:-(none)}" || true; } | grep -c . || true)
+# A ground whose contexts are named, none of them a bench name, is a REAL ground, and on a real ground
+# this block must never run: that is not "could not check", it is the suite's own rule (2026-11-01).
+# So the checks above are the verdict there, and the block is named as not run — as run-all names a
+# suite a container ground cannot host. A ground with no names at all is still refused: it cannot be told.
+if [ -n "$hosts" ] && [ -z "$( { printf '%s\n' "$hosts" | grep -xF "${bench_names:-(none)}" || true; } )" ]; then
+  echo "  not run on this ground: the induced-drift block (bench only — it disables the plugin and"
+  echo "          deletes a binding). No context here carries a bench name; the checks above are the verdict."
+  summary
+  exit $?
+fi
 if [ -z "$hosts" ] || [ "$notbench" != 0 ]; then
   echo "  REFUSING the induced-drift block: this ground does not look like a bench." >&2
-  echo "          Every context's http_host must end in the estate's bench zone ($bench_zone) — setup/bench-domains.py is" >&2
-  echo "          what makes that true, and the restore verb runs it. Found:" >&2
+  echo "          Every context's http_host must be one of this box's bench names ($(echo ${bench_names:-none derived})) —" >&2
+  echo "          infra's modx-environment.py names them and the restore verb writes them. Found:" >&2
   printf '            %s\n' $hosts >&2
   echo "          The block after this point disables the plugin and deletes a binding, which on a" >&2
   echo "          real ground is an outage. Nothing was induced and nothing was repaired." >&2
+  summary
+  exit 2
+fi
+
+# The repair below is 04-access-control.py, which refuses with no estate file. Measured 2026-10-31:
+# run with MODX_ESTATE unset, this block disabled the plugin and then could not put it back.
+if [ ! -f "${MODX_ESTATE:-}" ]; then
+  echo "  REFUSING the induced-drift block: MODX_ESTATE names no estate file, so its repair" >&2
+  echo "          (setup/04-access-control.py) could not run. Nothing was induced." >&2
   summary
   exit 2
 fi
@@ -379,6 +399,8 @@ converge() {
 check "$([ "$(verifier)" = 0 ] && echo 1 || echo 0)" \
       "the verifier is green before anything is induced" \
       "it is already reporting drift, so nothing below would mean anything"
+# ...and a drill on a drifting ground would only add to the drift: stop before inducing anything.
+if [ "$(verifier)" != 0 ]; then summary; exit 1; fi
 
 pid=$(q "SELECT id FROM modx_site_plugins WHERE name='protectOnSave';")
 

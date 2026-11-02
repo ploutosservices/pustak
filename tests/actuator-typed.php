@@ -40,7 +40,7 @@ if (($argv[1] ?? '') === '--drive') {
         }
         public function getOption($key, $options = null, $default = null) {
             return ['table_prefix' => 'modx_', 'cache_path' => $this->core . '/cache/',
-                    'settings_version' => '3.2.4-pl', 'sso.google_client_id' => 'present',
+                    'settings_version' => '3.2.4-pl', 'sso.oidc_client_id' => 'present',
                     'storage.base_url' => 'https://storage.example', 'log_level' => 1][$key] ?? $default;
         }
         public function getVersionData() { return ['full_version' => '3.2.4-pl']; }
@@ -211,12 +211,12 @@ check(is_file($DOCUMENT) && file_get_contents($DOCUMENT) === $rendered,
 // ── real answers pass, built by the code that builds them ─────────────────────────────────────
 echo "real answers:\n";
 $handed = ['atom' => 'modx', 'requires' => [
-    ['canonical' => 'vault:infra/google_sso_client_id', 'key' => 'sso.google_client_id',
+    ['canonical' => 'vault:infra/modx_oidc_client_id', 'key' => 'sso.oidc_client_id',
      'kind' => 'secret', 'required' => true, 'validate' => 'presence'],
     ['key' => 'endpoint:google/oidc', 'keys' => ['sso.issuer', 'sso.auth_endpoint'],
      'kind' => 'endpoint', 'mode' => 'all_of', 'required' => true, 'validate' => 'presence'],
 ]];
-$read = static fn(string $k): ?string => ['sso.google_client_id' => 'x', 'sso.issuer' => 'y'][$k] ?? null;
+$read = static fn(string $k): ?string => ['sso.oidc_client_id' => 'x', 'sso.issuer' => 'y'][$k] ?? null;
 $info = Actuator::verdicts($handed, $read);
 $info['environment'] = 'development'; $info['role'] = 'web'; $info['commit'] = null;
 $info['modx_version'] = Diagnostics::version(static fn(string $k): ?string => null, null);

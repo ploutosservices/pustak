@@ -21,13 +21,17 @@
      environment, empty for one nobody declared. Empty writes NO property, so the stylesheet
      falls through to --estate-env-undeclared; a property set to nothing would still beat that
      fallback and hide exactly the ground this is meant to expose. -->
-<header class="estate-bar" data-env="[[++estate_env]]"[[++estate_env_color:notempty=` style="--estate-env-color: [[++estate_env_color]]"`]]>
+<!-- data-estate-print-who: the signed-in reader's full name, which estate-print.js writes on every printed sheet
+     (estate-print.md §3); loginWidget draws the attribute, and nothing for a reader not signed in. -->
+<header class="estate-bar" data-env="[[++estate_env]]"[[++estate_env_color:notempty=` style="--estate-env-color: [[++estate_env_color]]"`]][[!loginWidget? &variant=`printWho`]]>
 
 	<!-- The logo cell: the page's own white, LEFT of the colour ("it should not sit on top of
-	     logo"). Every site wears the application's veena (the owner, 2026-10-07: "i want veena to be the image on all contexts. the client name is now written next to saraswati") — the site's own name stands beside it — which does not make two
-	     such sites identical any more, because the name beside it is the site's. -->
+	     logo"). The site's own logo (its `site_logo`, from the estate's `logo`), the application's veena
+	     where a site declares none — as kuber does (the owner, 2026-10-23: "would yo consider putting
+	     tenant logo there and app logo can be declared default", superseding 2026-10-07's veena on
+	     every context). The tab icon stays the veena. -->
 	<a class="estate-bar-logo" href="/">
-		<img src="[[++estate_cdn_url]]/brand/20261007-veena/favicon.svg" alt="[[++site_name]]">
+		<img src="[[++site_logo:default=`[[++estate_cdn_url]]/brand/20261007-veena/veena.svg`]]" alt="[[++site_name]]">
 	</a>
 
 	<div class="estate-bar-main">
@@ -36,8 +40,8 @@
 		     #leftNavCol on the page — the folder and public templates have none. Keyboard: [ -->
 		<button id="leftNavToggle" type="button" class="estate-bar-menu d-none"
 			aria-controls="leftNavCol" aria-expanded="true" aria-label="Show or hide the navigation"
-			title="Show or hide the side navigation (keyboard: [)">
-			<i class="bi bi-layout-sidebar"></i>
+			data-estate-tip="Show or hide the navigation">
+			<span class="estate-bar-icon" style="--estate-icon: url('[[++estate_cdn_url]]/estate/icons/menu.svg?v=e8a5a6306a17')" aria-hidden="true"></span>
 		</button>
 
 		<span class="estate-bar-app">[[++estate_app_name]]</span>
@@ -46,14 +50,20 @@
 
 		<div class="estate-bar-spacer"></div>
 
+		<!-- THE JUMP SLOT (estate-title-bar.md §The jump slot): this tenant's OTHER applications,
+		     from the ground's tenant-apps list, minus Library itself. Uncached: it is drawn only for
+		     a signed-in reader, and draws nothing at all when there is nothing to draw. -->
+		[[!estateJumps]]
+
 		<!-- The right-hand cluster is this application's own: search, then the greeting and sign
 		     out, which loginWidget renders with the estate's own classes. -->
 		<div class="estate-bar-actions">
 			<!-- PRINT — kuber's control, as the owner asked for it: the browser's own dialog,
-			     which offers Save as PDF. What leaves the paper is the print block in
-			     Bootstrap.5.CSS; the page's address on the first line is #modxPrintAddress,
-			     stamped by Bootstrap.5.Javascript at the moment of printing. -->
-			<a href="#" onclick="window.print(); return false;" title="Print / Save as PDF" aria-label="Print or save as PDF"><i class="bi bi-printer"></i></a>
+			     which offers Save as PDF. The printed page is estate-print's (claude/shared/design/
+			     estate-print.md): the frame and every region marked data-estate-print="hide" leave the
+			     paper, and each sheet's margins carry the tenant and title, the address, printed when
+			     and by whom, and Page N of M. -->
+			<a href="#" onclick="window.print(); return false;" data-estate-tip="Print / Save as PDF" aria-label="Print or save as PDF"><span class="estate-bar-icon" style="--estate-icon: url('[[++estate_cdn_url]]/estate/icons/print.svg?v=13a77bbdd682')" aria-hidden="true"></span></a>
 			<!-- THE WEATHER SLOT: one element, filled by the shared script the head loads
 			     from the CDN (estate-title-bar.md §The weather slot). The href is the estate's own
 			     weather page on the CDN — the estate_weather_url setting, which setup/02 derives
@@ -64,7 +74,7 @@
 			     keeps the reader on the page and the panel below mounts the CDN's weather.js. The
 			     href stays the stand-alone page, for a middle-click or a browser without script. -->
 			[[++estate_weather_url:notempty=`<a class="estate-bar-weather" href="[[++estate_weather_url]]" data-bs-toggle="offcanvas" data-bs-target="#estate-weather-panel" aria-controls="estate-weather-panel"></a>`]]
-			<a href="[[~[[++search_page]]]]" title="Search this site" aria-label="Search this site"><i class="bi bi-search"></i></a>
+			<a href="[[~[[++search_page]]]]" data-estate-tip="Search this site" aria-label="Search this site"><span class="estate-bar-icon" style="--estate-icon: url('[[++estate_cdn_url]]/estate/icons/search.svg?v=a687e89fdf81')" aria-hidden="true"></span></a>
 		</div>
 		[[!loginWidget? &variant=`estate`]]
 	</div>
@@ -76,7 +86,7 @@
 <!-- It HUGS the bar (the owner, 2026-10-02: "can it hug the title bar so it look part of it ... with
      same formatting as title bar color (based on environment)"): the same colour value as the bar,
      set the same way, starting where the bar's colour starts. Still outside the bar's slots. -->
-<nav class="navbar navbar-expand-md py-0 estate-sections"[[++estate_env_color:notempty=` style="--estate-env-color: [[++estate_env_color]]"`]]>
+<nav class="navbar navbar-expand-md py-0 estate-sections" data-estate-print="hide"[[++estate_env_color:notempty=` style="--estate-env-color: [[++estate_env_color]]"`]]>
 	<button class="navbar-toggler my-1" type="button" data-bs-toggle="collapse" data-bs-target="#navbarContent">
 		<span class="navbar-toggler-icon"></span>
 	</button>

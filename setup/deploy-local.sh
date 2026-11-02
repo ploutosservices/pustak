@@ -67,6 +67,14 @@ if [[ $DO_ELEMENTS = 1 ]]; then
   # restore puts the ground back whole, rather than a person remembering a second command.
   # MODX_ESTATE_ENV is the bench's own: this script only ever writes to MODX_ROOT on this box.
   MODX_ESTATE_ENV=${MODX_ESTATE_ENV:-development} python3 "$SCRATCH/modx/setup/02-system-settings.py"
+  # THE CLASS LIBRARY TRAVELS WITH THE ELEMENTS, as ops.sh _modx_lib_sync does for staging and
+  # production: an element that require_once's a class the bench does not have is a PHP fatal
+  # on its first request. Missed here until 2026-10-23, when an element needed a new library class
+  # and the bench answered 500. No --delete, as the deploy's copy deletes nothing.
+  lib="$MODX_ROOT/core/components/pustak/lib"
+  mkdir -p "$lib"
+  rsync -rt --chmod=D2775,F0664 "$SCRATCH/modx/common/lib/" "$lib/"
+  echo "deploy-local: class library $lib = common/lib @ $sw"
 fi
 php "$SCRATCH/modx/clear-cache.php"
 echo "deploy-local: DONE — bench at software $sw, estate $es"

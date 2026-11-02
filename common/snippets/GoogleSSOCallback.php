@@ -1,52 +1,29 @@
 /**
- * GoogleSSOCallback — complete the Google OAuth 2.0 / OIDC login. Lives on /sso/callback in each
- * SSO-gated context.
+ * GoogleSSOCallback — complete the sign-in at the estate's door (Chowkidar). Lives on /sso-callback
+ * in each SSO-gated context. The name is historical: a renamed element deploys as a NEW one.
  *
- * Flow (authorization-code, server-side):
- *   1. Verify the `state` returned by Google matches the one this session issued (CSRF).
- *   2. Exchange the `code` for tokens at Google's token endpoint over TLS (authenticated with the
- *      client secret) — the id_token thus comes DIRECTLY from Google over an authenticated TLS
- *      channel, so per Google's guidance signature re-verification is not required; we still
- *      validate the claims (aud / iss / exp / nonce) as defense in depth.
- *   3. Require email_verified, then apply the OPTIONAL allow-list clamp (off by default).
+ * Flow (authorization code with PKCE, server-side — chowkidar-2030 §2.1):
+ *   1. Verify the `state` returned matches one this session issued (CSRF), and take its verifier.
+ *   2. Exchange the `code` and the PKCE verifier for tokens at the door's token endpoint.
+ *   3. Verify the id_token's signature against the door's published keys, then its claims (iss,
+ *      aud, exp, nonce, sid), and require a verified email.
  *   4. Map the verified email to a MODx user (find; provision only if sso.auto_provision=1). This
  *      is THE gate: with auto_provision off, no MODx user for the email => denied.
  *   5. Establish the MODx web session for THIS context (addSessionContext) + fire OnWebLogin.
  *   6. Redirect to the stored same-site returnUrl, else the userHome router.
  *
- * Access model — plain MODx ("wall not curtain"): SSO proves WHO you are; access is decided
- * by MODx as always — a valid active user + resource-group/RBAC. Managing who gets in and what they
- * see is done in the MODx manager (create the user with their Google email; put them in groups),
- * never a separate list. The allow-list settings below are an optional temporary clamp, not the
- * everyday control.
+ * Access model — plain MODx ("wall not curtain"): the door proves WHO you are; access is decided
+ * by MODx as always — a valid active user + resource-group/RBAC, managed in the MODx manager.
  *
- * Requires server egress to accounts.google.com / oauth2.googleapis.com for the token exchange.
- *
- * Config (system settings, namespace `sso`):
- *   sso.provider               — 'google' (default) or 'oidc'. PER CONTEXT: one MODx serves
- *                                four contexts and they will not all be internal. Which settings
- *                                below apply is decided by this, in the estate library's
- *                                SsoConfig.php, which GoogleSSOStart reads too so the two halves of
- *                                one sign-in cannot disagree.
- *   sso.google_client_id, sso.google_client_secret — the shared project_sso web client
- *   sso.oidc_issuer / sso.oidc_auth_endpoint / sso.oidc_token_endpoint /
- *   sso.oidc_userinfo_endpoint / sso.oidc_jwks_uri / sso.oidc_client_id / sso.oidc_client_secret
- *                              — the estate's OIDC provider, for a context on an internal-zone name.
- *                                The owner's rule: internal names authenticate against the
- *                                estate provider, public names against Google — because Google will
- *                                not issue a callback to a name it cannot resolve publicly.
+ * Config: the context's `sso.oidc_*` (SsoConfig, which GoogleSSOStart reads too so the two halves
+ * of one sign-in cannot disagree), and:
  *   sso.auto_provision         — 1 to create a MODx user on first valid login, else unknown = deny (0)
  *   sso.provision_usergroup    — user-group name new users join (default: Members)
- *                                THESE FOUR ARE UNCHANGED BY THE PROVIDER CHOICE, deliberately:
- *                                the identity SOURCE moves, the authorisation rules do not.
- *   sso.auth_endpoint / sso.token_endpoint / sso.issuer — the bench's mock-oidc overrides on the
- *                                GOOGLE path. Predates sso.provider and is unchanged.
- *                                HONOURED ONLY INSIDE THE INTERNAL ZONE, so a bench can be pointed
- *                                at mock-oidc and production cannot.
  *
  * Reference codes: SSO-00 configuration, 01 state, 02 provider error, 03 no code, 05 token
  * exchange, 06 no id_token, 07/08 malformed, 09 iss, 10 aud, 11 exp, 12 nonce, 13 email,
- * 14 provisioning, 15 session, 16/17 userinfo, 18 signature, 19 no JWKS. SSO-04 is RETIRED — its check moved into SsoConfig
+ * 14 provisioning, 15 session, 16/17 userinfo, 18 signature, 19 no JWKS, 20 door token without
+ * sid. SSO-04 is RETIRED — its check moved into SsoConfig
  * and answers SSO-00 now; the number is not reused, because a code that meant one thing last month
  * and another this month is worse than no code.
  */
@@ -84,10 +61,22 @@ $deny = function ($logMsg, $email, $headline, $detail) use ($modx, $loginUrl) {
     @http_response_code(403);
     $e    = htmlspecialchars((string) $email, ENT_QUOTES, 'UTF-8');
     $url  = $loginUrl();
-    $link = $url !== ''
-        ? '<p><a class="btn btn-primary" href="' . htmlspecialchars($url, ENT_QUOTES, 'UTF-8')
-          . '">Sign in with a different account</a></p>'
-        : '';
+    // AT THE DOOR, "A DIFFERENT ACCOUNT" STARTS WITH SIGNING OUT. The door keeps the session it
+    // just made for this address, so a sign-in link here signed the same address straight back in
+    // and was a button that did nothing (the owner, 2026-10-20). Sign out ends MODx's and the
+    // door's, and lands on the card.
+    if (!empty($_SESSION['sso.door_hint'])) {
+        $out  = $modx->makeUrl((int) $modx->getOption('logout_page'), '', '', 'full');
+        $link = is_string($out) && $out !== ''
+            ? '<p><a class="btn btn-primary" href="' . htmlspecialchars($out, ENT_QUOTES, 'UTF-8')
+              . '">Sign out</a></p>'
+            : '';
+    } else {
+        $link = $url !== ''
+            ? '<p><a class="btn btn-primary" href="' . htmlspecialchars($url, ENT_QUOTES, 'UTF-8')
+              . '">Sign in with a different account</a></p>'
+            : '';
+    }
     return '<div class="sso-denied">'
          . '<h3>' . $headline . '</h3>'
          . '<p>You signed in as <strong>' . $e . '</strong>.</p>'
@@ -98,17 +87,36 @@ $deny = function ($logMsg, $email, $headline, $detail) use ($modx, $loginUrl) {
          . '</div>';
 };
 
-$fail = function ($logMsg, $ref = 'SSO-00') use ($modx) {
+$fail = function ($logMsg, $ref = 'SSO-00') use ($modx, $loginUrl) {
     $modx->log(modX::LOG_LEVEL_ERROR, '[GoogleSSOCallback] [' . $ref . '] ' . $logMsg);
     // Detail stays out of the browser; the reference code is what makes a report actionable.
     @http_response_code(403);
     $r = htmlspecialchars($ref, ENT_QUOTES, 'UTF-8');
+    // "TRY AGAIN" NEEDS A WAY TO TRY AGAIN. Without a button the only retry is reloading this page,
+    // which replays the spent callback and answers SSO-01 — the owner met exactly that on
+    // 2026-10-21 (SSO-05, reload, SSO-01). The button starts a fresh sign-in instead.
+    $url  = $loginUrl();
+    $link = $url !== ''
+        ? '<p><a class="btn btn-primary" href="' . htmlspecialchars($url, ENT_QUOTES, 'UTF-8')
+          . '">Sign in again</a></p>'
+        : '';
     return '<div class="sso-failed">'
          . '<h3>Sign-in could not be completed</h3>'
          . '<p>Please try again. If it keeps happening, contact the administrator and quote '
          . '<strong>' . $r . '</strong>.</p>'
+         . $link
          . '</div>';
 };
+
+// THE MANAGER'S RETURN, SENT ON UNREAD. The manager signs in on this site's own client and comes
+// back to this site's one declared return address (adminDoor). Its state starts with `mgr.`, and its
+// pending sign-in lives in the manager's session, not this one, so the return goes on to the manager,
+// on this same host, with the door's answer and nothing else.
+if (strpos((string) ($_GET['state'] ?? ''), 'mgr.') === 0) {
+    $pass = array_intersect_key($_GET, array_flip(['state', 'code', 'error', 'error_description', 'session_state', 'iss']));
+    $modx->sendRedirect(MODX_MANAGER_URL . '?modx-admin-callback&' . http_build_query($pass));
+    return '';
+}
 
 $modx->startSession();
 
@@ -138,7 +146,7 @@ if ($started === null) {
 }
 
 if (!empty($_GET['error'])) {
-    return $fail('Google returned error=' . preg_replace('/[^a-z_]/', '', (string) $_GET['error']), 'SSO-02');
+    return $fail('the door returned error=' . preg_replace('/[^a-z_]/', '', (string) $_GET['error']), 'SSO-02');
 }
 
 $code = (string) ($_GET['code'] ?? '');
@@ -165,26 +173,7 @@ $clientSecret = $sso->clientSecret;
 // two lines in both files, kept identical by a comment asking nicely.
 $redirectUri  = SsoConfig::redirectUri($modx);
 
-// --- 2. exchange code for tokens --------------------------------------------------------------
-// WHICH endpoint, and WHICH issuers are acceptable, both come from SsoConfig. THE GUARD is
-// unchanged and now states a rule rather than a testing affordance: a non-Google provider is
-// accepted ONLY inside the estate's private DNS zone.
-//
-// The test is the ZONE SUFFIX, not a hostname — the internal zone resolves nowhere outside the estate, so it
-// is a property of the network rather than a name anyone has to maintain. Hardcoding
-// one bench hostname here would be the known fault (a domain written into code), whereas asking "is
-// this host in the private zone" stays true as contexts are added, renamed or moved.
-//
-// An earlier version of this guard tested for plain http instead. It would have failed silently the
-// day the bench is given TLS — which is an open ask — by disabling the mock exactly when someone had
-// just made the bench more production-like. The owner caught it.
-//
-// THIS SNIPPET DOES NOT VERIFY THE id_token SIGNATURE. On the Google path that is Google's own
-// stated position: the token arrives on a direct server-to-server POST to Google's endpoint over
-// TLS. The OIDC path inherits the reasoning WITHOUT the TLS, because the estate's internal zone is
-// plain http today — a weaker assumption, written down here rather than left to be discovered. The
-// fix is one parameter on the estate's single JWT verifier and is an open ask; see the note at
-// the foot of SsoConfig.php.
+// --- 2. exchange code (and the PKCE verifier) for tokens at the door ---------------------------
 $tokenEndpoint = $sso->tokenEndpoint;
 $issuersOk     = $sso->issuers;
 $ch = curl_init($tokenEndpoint);
@@ -196,6 +185,7 @@ curl_setopt_array($ch, [
         'client_secret' => $clientSecret,
         'redirect_uri'  => $redirectUri,
         'grant_type'    => 'authorization_code',
+        'code_verifier' => (string) ($started['verifier'] ?? ''),
     ]),
     CURLOPT_RETURNTRANSFER => true,
     CURLOPT_TIMEOUT        => 12,
@@ -213,17 +203,10 @@ if (!is_array($tok) || empty($tok['id_token'])) {
     return $fail('token response has no id_token', 'SSO-06');
 }
 
-// --- VERIFY the id_token on the oidc path, parse-and-trust on the Google one ------------------
-// The asymmetry is deliberate and is the whole reason kuber was asked for one parameter.
-//
-// GOOGLE: unchanged. The token arrived on a direct server-to-server POST to Google's own endpoint
-// over TLS, which is Google's own stated position, and production runs down this branch.
-//
-// OIDC: the same reasoning WITHOUT the TLS, because the estate's internal zone is plain http. So
-// the signature is checked against the provider's published JWKS before a single claim is
-// believed — through `Kuber\Core\GoogleToken`, the estate's ONE verifier, which now takes an
-// issuer list (kuber-app ed78a3ab). No second implementation exists, and that is on purpose.
-if ($sso->provider === 'oidc') {
+// --- VERIFY the id_token against the door's published keys, before a single claim is believed --
+// Through `Kuber\Core\GoogleToken`, the estate's ONE verifier, with the door's issuers and JWKS
+// passed in, so its Google defaults are never reached (design chowkidar-step4-skunkworks-apps.md §2).
+{
     require_once rtrim(MODX_CORE_PATH, '/') . '/components/pustak/lib/GoogleToken.php';
     $jwksUri = $sso->jwksUri;
     if ($jwksUri === '') {
@@ -261,9 +244,7 @@ $parts = explode('.', $tok['id_token']);
 if (count($parts) !== 3) {
     return $fail('malformed id_token', 'SSO-07');
 }
-// JWT segments are base64URL with no padding; re-pad before decoding (unpadded base64_decode is
-// unreliable). Google delivered this over TLS from its token endpoint, so we parse-and-trust the
-// claims but still validate aud/iss/exp/nonce below.
+// JWT segments are base64URL with no padding; re-pad before decoding (the signature is verified above).
 $seg = strtr($parts[1], '-_', '+/');
 $seg .= str_repeat('=', (4 - strlen($seg) % 4) % 4);
 $payload = json_decode(base64_decode($seg, true), true);
@@ -285,6 +266,16 @@ if ((int) ($payload['exp'] ?? 0) <= time()) {
 $expectedNonce = (string) ($started['nonce'] ?? '');
 if ($expectedNonce === '' || ($payload['nonce'] ?? '') !== $expectedNonce) {
     return $fail('nonce mismatch (replay?)', 'SSO-12');
+}
+// A DOOR SESSION THIS SIDE CAN BE TOLD HAS ENDED, or none at all. The door's back-channel sign-out
+// names a session by `sid` (ssoBackchannelLogout), so a door sign-in without one would open a MODx
+// session nothing can end — refused here, before any session context exists. The same shape the
+// back-channel accepts, so every session opened can be named by it.
+// claude/shared/design/back-channel-logout-skunkworks.md.
+$doorSid = is_string($payload['sid'] ?? null) ? $payload['sid'] : '';
+if (!preg_match('/^[A-Za-z0-9-]{1,64}$/', $doorSid)) {
+    return $fail('the door\'s id_token carries no usable sid, so the back-channel sign-out could never '
+               . 'end this session', 'SSO-20');
 }
 
 // A conforming OIDC provider MAY leave email out of the id_token and serve it from /userinfo —
@@ -321,6 +312,11 @@ if ($email === '' || !$emailVerified) {
     return $fail('email missing or not verified', 'SSO-13');
 }
 
+// THE DOOR NOW HOLDS A SESSION FOR THIS ADDRESS, whatever MODx decides below. Kept so a refusal's
+// Sign out can end it (GoogleSSOLogout hands it to the door as id_token_hint); a sign-in that
+// succeeds replaces it with sso.id_token. claude/shared/design/modx-door-session.md.
+$_SESSION['sso.door_hint'] = (string) $tok['id_token'];
+
 // --- 4. map email -> MODx user ----------------------------------------------------------------
 $user = null;
 $profile = $modx->getObject('modUserProfile', ['email' => $email]);
@@ -329,12 +325,15 @@ if ($profile) {
 }
 
 if (!$user) {
+    // WHO MAY ENTER IS MODx's OWN DECISION (the owner, 2026-10-23: the door only proves who someone is;
+    // claude/shared/design/people-from-the-door-skunkworks.md). An address with no MODx user is
+    // refused unless this context's own sso.auto_provision is 1.
     if ((int) $modx->getOption('sso.auto_provision') !== 1) {
         return $deny("no MODx user for $email and auto-provision is off", $email,
                  'This address is not recognised',
-                 'There is no account on this site for that address. If you have more than one Google account, you may have signed in with a different one than you meant to.');
+                 'There is no account on this site for that address. If you have more than one account, you may have signed in with a different one than you meant to.');
     }
-    // Provision a disabled-password SSO user (login is only ever via Google).
+    // Provision a disabled-password SSO user (login is only ever through the door).
     $user = $modx->newObject('modUser');
     $user->set('username', $email);
     $user->set('active', 1);
@@ -378,14 +377,30 @@ $user->addSessionContext($ctx);
 // (a manager password login) asserts nobody and renders blank. Written after the session context
 // exists, so the two facts are never out of step.
 $_SESSION['sso.verified_email'] = $email;
+// ACT-AS, READ FROM THE DOOR'S TOKEN (design/estate-sign-in.md §2). The door puts the
+// impersonator's username in the claim `impersonator` (measured: a plain string, from a
+// user-session-note mapper). The door's IMPERSONATE event is the record; this is MODx's copy of the
+// fact for its own pages and log, so a login that carries none must clear it, never inherit it.
+$impersonator = is_string($payload['impersonator'] ?? null) ? trim($payload['impersonator']) : '';
+if ($impersonator !== '') {
+    $_SESSION['sso.impersonator'] = $impersonator;
+    $modx->log(modX::LOG_LEVEL_WARN, "[GoogleSSOCallback] $impersonator acting as $email in $ctx");
+} else {
+    unset($_SESSION['sso.impersonator']);
+}
 // KEEP THE TOKEN ITSELF (the owner 2026-08-03: "google token, not your session, decides the
-// logged in user"). Until today this was discarded here and downstream callers asserted the
+// logged in user" — the door's token since the door replaced Google). Until today this was discarded here and downstream callers asserted the
 // reader's identity from the session above — MODx vouching for someone. The rule now is: get a
 // good token, validate it, pass it on; no valid token and this side loses access too.
 // Stored raw because a consumer must be able to re-verify it; it never reaches a page (the
 // session store is server-side) and it dies with the session.
 $_SESSION['sso.id_token'] = (string) $tok['id_token'];
 $_SESSION['sso.id_token_exp'] = (int) ($payload['exp'] ?? 0);
+// THE ACCESS TOKEN TOO: a call on the reader's behalf exchanges it at the door for one addressed to
+// the callee. Server-side, like the id_token, and it dies with the session.
+$_SESSION['sso.access_token'] = (string) ($tok['access_token'] ?? '');
+// THE DOOR SESSION THIS ONE BELONGS TO, which the back-channel sign-out names and ssoRenew checks.
+$_SESSION['sso.sid'] = $doorSid;   // checked above: every sign-in has one
 // THE RENEWAL KEY: what the ssoRenew plugin trades for a new id_token before this one
 // expires. Server-side session only, like the token, and it dies with the session. A provider
 // that sent none is logged: that reader will be signed out when the hour is up, as before.
@@ -393,7 +408,7 @@ if (!empty($tok['refresh_token'])) {
     $_SESSION['sso.refresh_token'] = (string) $tok['refresh_token'];
 } else {
     unset($_SESSION['sso.refresh_token']);
-    $modx->log(modX::LOG_LEVEL_ERROR, "[GoogleSSOCallback] the $sso->provider token response for $email "
+    $modx->log(modX::LOG_LEVEL_ERROR, "[GoogleSSOCallback] the door's token response for $email "
         . 'carried no refresh_token — this session cannot be renewed and ends when the id_token expires');
 }
 $modx->invokeEvent('OnWebLogin', [
@@ -408,6 +423,6 @@ if ($returnUrl !== '' && $returnUrl[0] === '/' && strpos($returnUrl, '//') !== 0
 }
 // Default: site_start is the userHome router, which resolves this user's home for this context.
 // NOT login_page — after the SSO repoint login_page IS the sso-login (start) resource, so
-// redirecting there would bounce back to Google and loop.
+// redirecting there would bounce back to the door and loop.
 $modx->sendRedirect($modx->makeUrl((int) $modx->getOption('site_start'), '', '', 'full'));
 return '';

@@ -56,35 +56,29 @@
  *             audience carries the value; and *"each person has different access"*, so the value is
  *             fetched as the reader, never as the site.
  *
- *             WHAT IS ASSERTED, and it is deliberately the least this can honestly say:
- *               alg RS256 | iss modx | aud <the &auth name> | sub the reader's Google-verified
- *               email | iat now | exp now+60
- *             60 seconds because it is a request credential, not a session. Signed with the system
- *             setting `<audience>.jwt_private_key` — so `&auth=`kuber`` signs with
- *             `kuber.jwt_private_key`, and a second consumer is a second setting, not new code.
- *             The key is read at render time and never appears in output; the token is minted
+ *             WHAT IS SENT: the reader's door access token EXCHANGED at the door for the &auth name
+ *             (claude/shared/design/chowkidar-step4-skunkworks-apps.md §1) — aud the
+ *             &auth name, azp this context's client, signed by the door. MODx mints nothing: the
+ *             hand-made RS256 assertion (iss modx, `<audience>.jwt_private_key`) is retired. No
+ *             exchange, no fetch — never the reader's own token instead. The token is fetched
  *             server-side, sent server-side, and NEVER reaches the browser.
  *
- *             THERE IS DELIBERATELY NO SNIPPET THAT RETURNS A TOKEN. Minting lives inside this
- *             file rather than in a shared `kuberAssertion` element because an element that returns
- *             a signed assertion can be written into a page — `[[!kuberAssertion]]` — and then the
- *             credential IS the page. Twenty duplicated lines in a future second consumer is a
- *             cheaper problem than an element in the estate that leaks identity on request.
+ *             THERE IS DELIBERATELY NO SNIPPET THAT RETURNS A TOKEN. An element that returns one
+ *             can be written into a page — `[[!kuberAssertion]]` — and then the credential IS the page.
  *
  *             WHO THE READER IS, established from two independent facts that must agree:
  *             MODx must hold an authenticated web session for this context, AND the session must
- *             carry the address Google verified (`$_SESSION['sso.verified_email']`, stamped by
+ *             carry the address the door verified (`$_SESSION['sso.verified_email']`, stamped by
  *             GoogleSSOCallback at the moment of sign-in), AND that address must be the one on the
  *             signed-in account. A manager-created local login has no verified address and is
- *             therefore nobody here — which is the point: the claim `sub` makes is "Google verified
- *             this person", and only the SSO path can support it. Anything less than all three ->
+ *             therefore nobody here, and only the door's sign-in can support it. Anything less than all three ->
  *             no request is made at all. Not an unauthenticated fetch, not an empty table: silence,
  *             which is what "display blank" means when there is nobody to ask on behalf of.
  *
  *             A CREDENTIAL IS NEVER SENT IN CLEAR. https, or a host on loopback or the internal
- *             zone. The zone suffix is the owner's own rule from mock-oidc — a zone suffix is a
- *             property of the network, an FQDN is only a name — and it is reused here rather than
- *             re-decided. Anything else is refused before the socket opens.
+ *             zone. The zone suffix is the owner's own rule — a zone suffix is a property of the
+ *             network, an FQDN is only a name — and it is reused here rather than re-decided.
+ *             Anything else is refused before the socket opens.
  *   &rows     dot-path to the array of rows inside the document, e.g. `jobs` or `data.items`.
  *             Real feeds wrap their rows in an envelope carrying metadata — the backup feed is
  *             {"generated": "...", "jobs": [...]} — and without this the envelope itself is the
@@ -399,45 +393,17 @@ if ($rawJson === '' && $url !== '') {
             // The owner's rule, and the reason this is a return rather than a fetch: "if not logged in,
             // display blank". The alternative — asking the audience as the site — would hand a page
             // one person's data to whoever opened it.
-            return $fail("no signed-in, Google-verified reader: nothing was requested from '$auth'");
+            return $fail("no signed-in, door-verified reader: nothing was requested from '$auth'");
         }
 
-        $keySetting = $auth . '.jwt_private_key';
-        $privateKey = (string) $modx->getOption($keySetting, null, '');
-        if (trim($privateKey) === '') {
-            return $fail("system setting $keySetting is empty — refusing to fetch $url without the "
-                       . 'identity it exists to carry');
+        // The reader's door token exchanged for the &auth name. No exchange, no fetch.
+        require_once rtrim(MODX_CORE_PATH, '/') . '/components/pustak/lib/SsoConfig.php';
+        $exchanged = SsoConfig::forContext($modx)->exchangeFor((string) ($_SESSION['sso.access_token'] ?? ''), $auth);
+        if ($exchanged === '') {
+            return $fail("the door gave no token for '$auth' (no access token in the session, or the "
+                       . "exchange was refused) — nothing was requested from $url");
         }
-
-        $b64url = function ($raw) {
-            return rtrim(strtr(base64_encode($raw), '+/', '-_'), '=');
-        };
-        $now     = time();
-        $header  = $b64url((string) json_encode(['alg' => 'RS256', 'typ' => 'JWT']));
-        // 60 seconds: a request credential, not a session. Claim names and order are the ones
-        // kuber's Crypto::jwtVerify() reads; iss and aud are both mandatory there
-        // because with two issuers in play nothing else distinguishes their tokens.
-        $payload = $b64url((string) json_encode([
-            'iss' => 'modx',
-            'aud' => $auth,
-            'sub' => $reader,
-            'iat' => $now,
-            'exp' => $now + 60,
-        ]));
-        $sig = '';
-        // A key that is present but unusable — truncated in the settings field, wrong format — must
-        // refuse, not raise: PHP signals this by warning and returning false, and on some builds by
-        // throwing. Either way the page must survive and say what happened.
-        try {
-            $signed = @openssl_sign("$header.$payload", $sig, $privateKey, OPENSSL_ALGO_SHA256);
-        } catch (Throwable $e) {
-            $signed = false;
-        }
-        if (!$signed) {
-            return $fail("could not sign with $keySetting — the setting holds something that is not "
-                       . 'a usable private key');
-        }
-        $authHeader = "Bearer $header.$payload." . $b64url($sig);
+        $authHeader = "Bearer $exchanged";
     }
 
     $timeout = $urlTimeout > 0 ? $urlTimeout : 3;
@@ -546,6 +512,11 @@ if ($data === null && json_last_error() !== JSON_ERROR_NONE) {
 //                                        `"text": false` draws the icon alone, for a column whose words
 //                                        add nothing (every manifest is service.json)
 //                                        (the feeds page)
+//                               `backlog-record` = the value is a backlog record's NUMBER; the
+//                                        whole cell (estate-link) opens that record in Munshi's backlog
+//                                        viewer, at system setting `munshi.backlog_url` + "/<n>". The
+//                                        feed names the type, never the address (the owner's ruling); an
+//                                        empty setting leaves the number as plain text
 //   legend[{status,label,colour}]  the badge colour for each status (Bootstrap text-bg-<colour>),
 //                               rendered under the table as the key to the colours
 //   notes[]                     one line each, under the legend
@@ -555,6 +526,12 @@ if ($data === null && json_last_error() !== JSON_ERROR_NONE) {
 if ($columns === '' && is_array($data) && isset($data['columns']) && is_array($data['columns'])
     && $data['columns'] !== [] && is_array(reset($data['columns']))) {
     $doc   = $data;
+    // Where a backlog-record opens: the environment's own setting, http(s) only, no trailing slash.
+    // No default — an environment nobody addressed shows the number and nothing that could mislead.
+    $backlogUrl = rtrim(trim((string) $modx->getOption('munshi.backlog_url', null, '')), '/');
+    if (!preg_match('#^https?://#i', $backlogUrl)) {
+        $backlogUrl = '';
+    }
     $h     = function ($v) { return htmlspecialchars(is_scalar($v) ? (string) $v : '', ENT_QUOTES, 'UTF-8'); };
     $cols  = [];
     // One column spec, normalised. `icon` (any column): the header is drawn as that icon —
@@ -754,6 +731,13 @@ if ($columns === '' && is_array($data) && isset($data['columns']) && is_array($d
                     $out .= '<td><a class="gitea-link" href="' . $h($row[$c['href']])
                           . '" target="git" data-bs-toggle="tooltip" title="' . $h($row[$c['href']]) . '"></a>'
                           . ($c['text'] ? $h($v) : '') . '</td>';
+                } elseif ($c['type'] === 'backlog-record' && ctype_digit(trim((string) $v)) && $backlogUrl !== '') {
+                    // The estate's clickable cell (the owner's ruling): the WHOLE <td> opens the record and
+                    // carries estate-link's pointer and hover; the number is text, never a hyperlink or an
+                    // icon. Bootstrap.5.Javascript's data-content-url handler opens it.
+                    $n    = trim((string) $v);
+                    $out .= '<td class="estate-link' . ($nc($key) !== '' ? ' estate-num' : '') . '" data-sort="' . $h($n)
+                          . '" data-content-url="' . $h($backlogUrl . '/' . $n) . '" tabindex="0">' . $h($n) . '</td>';
                 } elseif ($c['type'] === 'link' && $c['href'] !== '' && is_scalar($row[$c['href']] ?? null)
                           && preg_match('#^https?://#i', (string) $row[$c['href']])) {
                     // http(s) only: a feed must not be able to put a javascript: address on the page.

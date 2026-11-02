@@ -10,7 +10,7 @@
          and only the SVG carries the prefers-color-scheme rule that lifts the fill. cdn is served
          immutable for a year, so the dated path is load-bearing — a better master means a NEW
          dated directory plus a change here, never an overwrite. -->
-    <link rel="icon" href="[[++estate_cdn_url]]/brand/20261007-veena/favicon.svg" type="image/svg+xml">
+    <link rel="icon" href="[[++estate_cdn_url]]/brand/20261007-veena/veena.svg" type="image/svg+xml">
     <link rel="icon" href="[[++estate_cdn_url]]/brand/20261007-veena/veena-32.png" sizes="32x32">
     <link rel="apple-touch-icon" href="[[++estate_cdn_url]]/brand/20261007-veena/apple-touch-icon.png">
 
@@ -31,9 +31,16 @@
          site and 404, and the bar would arrive unstyled. It is the address every estate site
          already serves from, and the day it moves the SETTING is what moves. -->
     <link rel="stylesheet" href="[[++estate_cdn_url]]/estate/titlebar/titlebar.css">
-    <!-- The weather slot's one script, loaded only when this ground has a weather page to
-         send the click to — topNavBar renders the slot on the same condition. -->
-    [[++estate_weather_url:notempty=`<script src="[[++estate_cdn_url]]/estate/titlebar/titlebar.js" defer></script>`]]
+    <!-- titlebar.js writes the greeting by the reader's clock and fills the weather slot where topNavBar
+         renders one (estate-title-bar.md §2.3, §3); estate-tip.js and estate-hover.js place the bar's hover
+         sentences and the greeting's card on screen (estate-tip.md, estate-hover.md). Their stylesheets are
+         imported by titlebar.css. -->
+    <script src="[[++estate_cdn_url]]/estate/titlebar/titlebar.js" defer></script>
+    <script src="[[++estate_cdn_url]]/estate/tip/estate-tip.js" defer></script>
+    <script src="[[++estate_cdn_url]]/estate/hover/estate-hover.js" defer></script>
+    <!-- THE PRINTED PAGE's corners a stylesheet cannot know: the tenant and title, the address, printed when
+         and by whom (claude/shared/design/estate-print.md; its stylesheet is imported by titlebar.css). -->
+    <script src="[[++estate_cdn_url]]/estate/print/estate-print.js" defer></script>
     <!-- THE ESTATE TABLE — one table style for Data, Kuber and Library, built the way the
          title bar is; the address, the fallback and the reasons are the same as above. A table
          wears it by its class names (estate-table and friends); Library adds no rule of its own

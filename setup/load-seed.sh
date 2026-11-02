@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
 # load-seed.sh — the ONE door for loading install/modx-seed.sql.gz into a MODx DB.
 #
-#     setup/load-seed.sh --profile prod      # production container: public domains
-#     setup/load-seed.sh --profile bench     # dev bench: the estate's bench zone
+#     setup/load-seed.sh
 #
-# Load + bind + verify are ONE operation here, deliberately. The seed carries the BENCH hosts by
-# design; binding the target profile used to be a separate hand-run step (setup/10 on prod), and a
-# seed load that skipped it left production resolving on the bench names with nothing complaining
-# ("if you hardcode a domain it must be overwritten on upload"). Words in a runbook did not
-# survive; this does: the load cannot succeed without the bind, and the bind is asserted afterwards.
+# Load + bind + verify are ONE operation here, deliberately. The seed carries some installation's
+# names; binding this installation's used to be a separate hand-run step, and a seed load that
+# skipped it left production resolving on the bench names with nothing complaining ("if you
+# hardcode a domain it must be overwritten on upload"). Words in a runbook did not survive; this
+# does: the load cannot succeed without the bind, and the bind is asserted afterwards. The names
+# are infra's: MODX_ROOT's core/config/application.php holds them and
+# setup/apply-environment.php writes them, then checks them.
 #
 # Scope: DB only — schema, content, and the domain binding. Files (docroot tar), machine config,
 # nginx, DNS and cache belong to the caller: setup/make-current.sh on the bench,
@@ -19,26 +20,12 @@
 # FORCE=1 overwrites a DB that already holds resources; without it a populated DB is refused.
 set -euo pipefail
 
-PROFILE=""
 while [ $# -gt 0 ]; do
   case "$1" in
-    --profile) PROFILE="${2:-}"; shift 2 ;;
-    --profile=*) PROFILE="${1#*=}"; shift ;;
     -h|--help) sed -n '2,20p' "$0"; exit 0 ;;
     *) echo "load-seed: unknown argument '$1'" >&2; exit 2 ;;
   esac
 done
-# BINDER_ARGS is an array because 'local' is bench-domains.py with a flag, not a different script:
-# the third instance differs from the bench in exactly one field (site_url) and sharing the binder
-# is what keeps that true. Word-splitting a string here would break the first time an argument
-# carried a space.
-BINDER_ARGS=()
-case "$PROFILE" in
-  prod)  BINDER='10-production-domains.py' ;;
-  bench) BINDER='bench-domains.py' ;;
-  local) BINDER='bench-domains.py'; BINDER_ARGS=(--profile local) ;;
-  *) echo "load-seed: --profile must be 'prod', 'bench' or 'local' (got '${PROFILE}')" >&2; exit 2 ;;
-esac
 
 # THIS VERB WRITES, so its defaults are the dangerous kind. MODX_ROOT defaulted to
 # /srv/local/modx — one ground's docroot, typed — and the database triple defaulted to
@@ -82,8 +69,9 @@ die(){ printf 'load-seed: %s\n' "$*" >&2; exit 1; }
 # --- preconditions (fail fast — a half-loaded DB is worse than no load) ---------------------------
 [ -f "$SEED" ] || die "missing $SEED — pull the modx repo first"
 command -v mysql   >/dev/null || die "mysql client absent"
-command -v python3 >/dev/null || die "python3 absent (the domain bind needs it)"
-python3 -c 'import pymysql' 2>/dev/null || die "python3 pymysql absent (the domain bind needs it)"
+command -v php     >/dev/null || die "php absent (the environment bind needs it)"
+[ -f "$MODX_ROOT/core/config/application.php" ] \
+  || die "no $MODX_ROOT/core/config/application.php — the names to bind are infra's render (a bench: setup/bench-application.py)"
 "${MYSQL[@]}" -e 'SELECT 1' >/dev/null 2>&1 \
   || die "cannot reach MariaDB as $MODX_DB_USER@$MODX_DB_HOST"
 
@@ -105,13 +93,13 @@ count="$("${MYSQL[@]}" -N -e "SELECT COUNT(*) FROM \`$MODX_DB_NAME\`.modx_site_c
 log "resources loaded: $count"
 
 # --- bind (NOT optional — this is the whole point of the one door) ----------------------------------
-log "bind $PROFILE domains ($BINDER)"
-python3 "$SETUP/$BINDER" "${BINDER_ARGS[@]}"
+log "bind this installation's environment (setup/apply-environment.php)"
+php "$SETUP/apply-environment.php" || die "apply-environment.php failed — the DB carries the seed's names"
 
-# --- assert (the binder self-verifies; this proves it independently, and is what CI/drift can call) --
-python3 "$SETUP/verify-domains.py" --profile "$PROFILE" --quiet \
-  || die "post-load verification failed — the DB does not match the $PROFILE binding"
-log "verified: context domains match the $PROFILE binding"
+# --- assert (independently of the write, and what CI/drift can call) -------------------------------
+php "$SETUP/apply-environment.php" --check >/dev/null \
+  || die "post-load verification failed — the DB does not match application.php"
+log "verified: the DB matches application.php"
 
 # --- cache -------------------------------------------------------------------------------------------
 if [ -d "$MODX_ROOT/core/cache" ]; then
@@ -121,4 +109,4 @@ else
   log "no $MODX_ROOT/core/cache — skipping cache clear (clear it wherever the tree lives)"
 fi
 
-echo "load-seed: $MODX_DB_NAME loaded ($count resources), $PROFILE domains bound and verified."
+echo "load-seed: $MODX_DB_NAME loaded ($count resources), environment bound and verified."

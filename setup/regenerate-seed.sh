@@ -67,9 +67,10 @@ if [ -z "$HOSTS" ]; then
   echo "An empty answer is not a passing one — this is either the wrong database or an empty one." >&2
   exit 1
 fi
-BENCH_ZONE=$(python3 "$(dirname "$0")/estate-get.py" domains.bench_zone) || { echo "REFUSING: the estate declares no bench zone, so this database cannot be told from production." >&2; exit 1; }
-if ! echo "$HOSTS" | grep -qF "$BENCH_ZONE"; then
-  echo "REFUSING: context http_host does not look like the bench (*.$BENCH_ZONE):" >&2
+# This box's bench names are infra's (the bench renderer's --names reads config modx-environment.py).
+BENCH_NAMES=$(python3 "$(dirname "$0")/bench-application.py" --names) || { echo "REFUSING: infra's derivation gave no bench names for this box, so this database cannot be told from production." >&2; exit 1; }
+if ! echo "$HOSTS" | grep -qxF "$BENCH_NAMES"; then
+  echo "REFUSING: no context http_host is one of this box's bench names ($(echo $BENCH_NAMES)):" >&2
   echo "$HOSTS" >&2
   echo "The seed must be regenerated from the bench, never from production." >&2
   exit 1

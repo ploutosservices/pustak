@@ -12,10 +12,11 @@
 #
 # WHY THIS IS AN INTEGRATION TEST AND NOT A UNIT ONE. The claim is about what a real sign-in leaves
 # in a real session. Stubbing MODx's session, user lookup and token exchange would test my model of
-# three systems. This drives the actual flow against mock-oidc — which exists precisely so
-# sign-in is exercisable without production — and then reads the session out of the database.
+# three systems. This drives the actual flow against the door's non-production realm — which holds
+# test users precisely so sign-in is exercisable without production — and then reads the session
+# out of the database.
 #
-# WHAT IT NEEDS: this box's MODx bench, its vhost, and mock-oidc wired as sso.auth_endpoint. It
+# WHAT IT NEEDS: this box's MODx bench, its vhost, and the context's sso.oidc_* rows at the door. It
 # creates one session row and removes it again. It writes nothing else.
 set -uo pipefail
 
@@ -34,7 +35,7 @@ DOOR=$(host_door "$HOST") || exit 2
 
 require_repo
 require_bench
-require_mock_idp
+require_nonprod_door
 
 echo "GoogleSSOCallback — the session records the verified identity"
 
@@ -44,10 +45,9 @@ echo "GoogleSSOCallback — the session records the verified identity"
 # already map to one.
 # modUserProfile's table is modx_user_attributes, not modx_user_profile — the class name and the
 # table name differ, and guessing the second from the first is how this failed its first run.
-reader=$(q "SELECT p.email FROM modx_user_attributes p JOIN modx_users u ON u.id=p.internalKey
-            WHERE u.active=1 AND p.email LIKE '%@%' ORDER BY u.id LIMIT 1;")
+reader=$(drill_reader)   # a machine identity, never a person
 if [ -z "$reader" ]; then
-  echo "REFUSING TO RUN: no active user with an email address on this bench." >&2
+  echo "REFUSING TO RUN: drill_reader could not seat the suites' machine identity on this ground." >&2
   exit 2
 fi
 
@@ -59,19 +59,10 @@ C=(curl -sS --resolve "${DOOR%%:*}:$PORT:$IP" -b "$jar" -c "$jar" -m 10)
 loc=$("${C[@]}" -o /dev/null -w '%{redirect_url}' "$SCHEME://$DOOR/sso-login?sso=go")
 check "$([ -n "$loc" ] && echo 1 || echo 0)" "sso-login redirects to the provider" "got: '$loc'"
 
-# 2. mock-oidc's form carries the whole authorize request back as one field.
-form=$("${C[@]}" "$loc")
-qval=$(printf '%s' "$form" | grep -o 'name="q" value="[^"]*"' | head -1 | sed 's/.*value="//; s/"$//')
-check "$([ -n "$qval" ] && echo 1 || echo 0)" "the provider offers its sign-in form" \
-      "$(printf '%s' "$form" | head -c 200)"
-[ -z "$qval" ] && { summary; exit 1; }
-# The form value is HTML-escaped; only &amp; can appear in a percent-encoded JSON blob.
-qval=${qval//&amp;/&}
-
-# 3. Sign in as that address. The mock verifies nothing — that is the point of it.
-cb=$("${C[@]}" -o /dev/null -w '%{redirect_url}' -X POST \
-     --data-urlencode "q=$qval" --data-urlencode "email=$reader" "${loc%%\?*}")
+# 2–3. Sign in as that address at the door, by the test user's password.
+cb=$(idp_sign_in "$loc" "$reader")
 check "$(has "$cb" 'code=')" "signing in yields an authorization code" "got: '$cb'"
+[ -z "$cb" ] && { summary; exit 1; }
 
 # 4. MODx completes the exchange server-side and establishes the session.
 # `"${cb/http:\/\/$HOST/http://$HOST}"` was here: a parameter substitution replacing a string

@@ -57,7 +57,7 @@ to them for detail.
 | **Installation** | One MODx docroot together with its own database. |
 | **Environment** | The role an installation plays: production, staging, or a development bench. |
 | **Bench** | A disposable development installation on a developer's machine. |
-| **Edge** | The web server in front of MODx (nginx on real installations, `php -S` on a bench). |
+| **Edge** | The web server in front of MODx (nginx, on every installation). |
 | **Estate** | One owner's content and declarations: their contexts, people, groups, domains and documents. |
 | **Estate file** | `estate.json` in the content repository, named to every script by the `MODX_ESTATE` variable. |
 | **Seat** | The document tree in git (`seat/documents/`) and the scripts that move it to and from a database. |
@@ -149,8 +149,7 @@ header. It serves the context only if the database holds that context and it is 
 own (`mgr` or `web`). Any other request, whether it has no header, an unknown key or a malformed
 one, gets a fixed 404 page that ships beside the class, and MODx is never started for it. The
 database is asked because MODx, when given a context it does not have, starts with no context and
-fails later somewhere less clear. On a bench, `setup/bench-server.php` is the router for one
-`php -S` listener per context, and it sets the header from `BENCH_TENANT`.
+fails later somewhere less clear. A bench is served the same way, by a web server that sets the header.
 
 Two companions keep links right when a context answers on several names. The `edgeAddress` plugin
 (event `OnMODXInit`) rewrites `site_url` and `http_host` for the current request only, and only when
@@ -162,7 +161,7 @@ that context's own `site_url`, so no second copy of a context's address is kept 
 Domain binding is part of every restore (17). This is one of the two upstream requests (21).
 
 **Where.** `common/lib/EdgeContext.php`, `common/lib/no-one-here-20261012.html`,
-`setup/config-context.py` (writes and checks the one line), `setup/bench-server.php`,
+`setup/config-context.py` (writes and checks the one line),
 `common/plugins/edgeAddress`, `common/snippets/contextBase.php`, `setup/11-add-context.py`,
 `tests/edge-context.php`.
 
@@ -185,7 +184,7 @@ it into the database.
 **How it works.**
 
 1. `core/config/application.php` is rendered per installation. On real installations infra's
-   provisioning role renders it. On a bench, `setup/bench-application.py` renders it from the
+   provisioning role renders it. On a bench, the bench's own renderer renders it from the
    estate file. Because it is not in the database, no restore copies it. It is also kept out of the
    docroot archive, and no MODx upgrade rewrites it (the upgrader does rewrite `config.inc.php`,
    which is why that file was rejected). It is under `core/`, which the web server denies.
@@ -213,7 +212,7 @@ environment from this file and refuses rather than infer it from a hostname. Sto
 reads its certificate location from here. This is the other upstream request (21).
 
 **Where.** `docs/apply-environment.md`, `setup/apply-environment.php`,
-`setup/lib/ApplyEnvironment.php`, `setup/bench-application.py`, `common/lib/Application.php`,
+`setup/lib/ApplyEnvironment.php`, `common/lib/Application.php`,
 `tests/apply-environment.php`, `tests/application-badge.php`, `service.json` `identity.$roles`.
 
 ---
@@ -323,9 +322,9 @@ default, and access is managed in the manager with no second list.
 
 `common/lib/SsoConfig.php` decides the provider for each context. MODx's `getOption` already
 resolves a context setting over a system setting, so per-context settings are the whole mechanism.
-Public names use Google. Names in the estate's private zone use the estate's own OIDC provider. On
-benches a mock provider stands in, and the code honours that override only inside the private zone,
-so production cannot be pointed at the mock. Both halves of a sign-in read the same class, so the
+Every context signs in at the estate sign-in door: production at production's door, a bench or
+staging at the non-production door's realm for that ground, and the suites refuse to drive any
+other. Both halves of a sign-in read the same class, so the
 start and the callback cannot disagree about the provider, the client or the redirect address. Token
 verification is a pinned, vendored copy of the bookkeeping system's verifier
 (`common/lib/GoogleToken.php`, recorded in `ships`), not a second implementation. The `ssoRenew`
@@ -337,10 +336,10 @@ The Login Extra is not installed and must not be reinstated.
 
 **Connections.** Access control (9) decides what a signed-in reader sees. Protected files (10) use
 the same access control. Render-time fetches as the reader (11, 12) forward the verified token.
-Restore (17) must point a bench's sign-in at the mock provider.
+Restore (17) loads production's rows, so the bench's sign-in setup must re-point a bench at the dev realm.
 
 **Where.** `docs/modx-sso-design.md`, `common/snippets/GoogleSSO*.php`,
-`common/snippets/loginWidget.php`, `common/chunks/Bootstrap.5.googleLogin.html`,
+`common/snippets/loginWidget.php`,
 `common/lib/SsoConfig.php`, `common/lib/GoogleToken.php`, `common/plugins/ssoRenew`,
 `setup/12-sso.py`, `tests/sso-*.{sh,php}`, `tests/auth-end-to-end.sh`,
 `tests/signing-out-really-signs-out.php`.
@@ -657,7 +656,7 @@ upgrades (15), which regenerate the pair.
 **Where.** `docs/installation.md`, `docs/production-install.md`, `setup/RUNBOOK.md` (the original
 migration replay), `setup/config.xml`, `setup/install-extras.php`, `setup/0*.py`–`setup/2*.py`,
 `setup/load-seed.sh`, `setup/make-current.sh`, `setup/regenerate-*.sh`,
-`setup/verify-domains.py`, `setup/bind-production-domains.sh`.
+`setup/apply-environment.php`.
 
 ---
 
@@ -677,8 +676,8 @@ credential. After loading, the following must be reapplied:
 
 | What | By | Why |
 |---|---|---|
-| Context hosts | `setup/bench-domains.py` (bench); the staging verb (staging); `setup/verify-domains.py` checks | otherwise the copy links to, and answers for, production's names |
-| Sign-in provider | `setup/12-sso.py` pointed at the mock provider | a copy must not sign anyone in for real |
+| Context hosts | `setup/apply-environment.php` from infra's derivation (the bench's own renderer on a bench); `apply-environment.php --check` checks | otherwise the copy links to, and answers for, production's names |
+| Sign-in provider | the bench's sign-in setup (12-sso.py pointed at the door's dev realm) | a copy must not sign anyone in at production's door |
 | Environment settings | today, settings passes and literal writes inside infra's verbs; once section 5 lands, `setup/apply-environment.php` alone | production's rows describe production |
 | Elements at git's ref | `setup/deploy-local.sh` (bench) | the dump may be behind git |
 | The working tree | `git status`, then `setup/pull-direction.py` | the regenerated tree may revert newer work |
@@ -692,7 +691,7 @@ such a page.
 (16) rebuilds from the medium instead of from production.
 
 **Where.** `docs/workflow.md` (the prod-to-dev loop, the download guard), `docs/apply-environment.md`
-(the survey of what differs), `setup/bench-domains.py`, `setup/12-sso.py`,
+(the survey of what differs), `setup/12-sso.py`,
 `setup/bench-open-reading.py` (a bench reachable with no sign-in, reversible),
 `setup/deploy-local.sh`, `setup/pull-direction.py`, `clear-cache.php`.
 
