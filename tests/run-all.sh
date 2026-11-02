@@ -89,6 +89,7 @@ suites=(
   "python3 tests/addition-reviewed.py"
   "$PHP_RUN $REPO/tests/apply-environment.php"
   "python3 tests/content-vocabulary.py"
+  "bash tests/publish-clean.sh"
   "python3 tests/app-name-from-manifest.py"
   "bash tests/before-apply-touches-nothing.sh"
   "$PHP_RUN $REPO/tests/kuber-google-token.php"
